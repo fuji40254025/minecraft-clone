@@ -522,6 +522,7 @@ function setUIVisible(on) {
   document.getElementById('crosshair').style.display = on ? 'block' : 'none';
   document.getElementById('hotbar').style.display = on ? 'flex' : 'none';
   document.getElementById('hud').style.display = on ? 'block' : 'none';
+  document.getElementById('hearts').style.display = on ? 'block' : 'none';
   document.getElementById('touchUI').style.display = (on && isTouch) ? 'block' : 'none';
   if (!on) { keys.clear(); stopMining(); }
 }
@@ -569,7 +570,7 @@ function raycast() {
     if (x === px && y === py && z === pz) continue;
     const id = getBlock(x, y, z);
     if (id !== 0 && id !== 5) {
-      return { x, y, z, id, px, py, pz };
+      return { x, y, z, id, px, py, pz, t };
     }
     px = x; py = y; pz = z;
   }
@@ -583,6 +584,9 @@ function blockIntersectsPlayer(bx, by, bz) {
 }
 
 function doBreak() {
+  // モブが照準上にいれば攻撃を優先
+  const m = raycastMob();
+  if (m) { hitMob(m); return; }
   const hit = raycast();
   if (!hit || hit.id === 11) return; // 岩盤は壊せない
   setBlock(hit.x, hit.y, hit.z, 0);
@@ -728,6 +732,345 @@ function sfx(f0, f1, dur, type, vol) {
   } catch (e) {}
 }
 
+/* ===================== モブ（キャラクター） ===================== */
+let curBright = 1; // 昼夜の明るさ（updateDayNightが更新）
+
+const MOB_TYPES = {
+  pig:    { name: 'ブタ',   hw: 0.35, hh: 1.0,  speed: 1.3, hp: 4 },
+  sheep:  { name: 'ヒツジ', hw: 0.40, hh: 1.25, speed: 1.2, hp: 4 },
+  zombie: { name: 'ゾンビ', hw: 0.30, hh: 1.9,  speed: 1.5, hp: 6, hostile: true },
+};
+const MOBS = [];
+const ANIMAL_CAP = 8, ZOMBIE_CAP = 5;
+
+/* ----- モブ用テクスチャ ----- */
+function mobTex(draw) {
+  const cv = document.createElement('canvas');
+  cv.width = 16; cv.height = 16;
+  const c = cv.getContext('2d');
+  draw(c);
+  const tx = new THREE.CanvasTexture(cv);
+  tx.magFilter = THREE.NearestFilter;
+  tx.minFilter = THREE.NearestFilter;
+  tx.generateMipmaps = false;
+  return tx;
+}
+function texNoise(c, r, g, b, v) {
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const k = 1 + (Math.random() * 2 - 1) * v;
+    c.fillStyle = `rgb(${(r*k)|0},${(g*k)|0},${(b*k)|0})`;
+    c.fillRect(x, y, 1, 1);
+  }
+}
+const MOB_TEX = {
+  pigSkin: mobTex(c => texNoise(c, 238, 160, 160, .07)),
+  pigFace: mobTex(c => {
+    texNoise(c, 238, 160, 160, .07);
+    c.fillStyle = '#000'; c.fillRect(3, 5, 2, 2); c.fillRect(11, 5, 2, 2); // 目
+    c.fillStyle = '#e08888'; c.fillRect(5, 8, 6, 4);                       // 鼻
+    c.fillStyle = '#a04848'; c.fillRect(6, 9, 1, 2); c.fillRect(9, 9, 1, 2);
+  }),
+  sheepWool: mobTex(c => texNoise(c, 228, 224, 216, .06)),
+  sheepLeg: mobTex(c => texNoise(c, 214, 192, 158, .08)),
+  sheepFace: mobTex(c => {
+    texNoise(c, 214, 192, 158, .08);
+    c.fillStyle = '#fff'; c.fillRect(0, 0, 16, 4);                         // 頭の毛
+    c.fillStyle = '#000'; c.fillRect(3, 6, 2, 2); c.fillRect(11, 6, 2, 2); // 目
+  }),
+  zombieSkin: mobTex(c => texNoise(c, 96, 150, 80, .12)),
+  zombieFace: mobTex(c => {
+    texNoise(c, 96, 150, 80, .12);
+    c.fillStyle = '#000'; c.fillRect(3, 5, 2, 2); c.fillRect(11, 5, 2, 2); // 目
+    c.fillStyle = '#2a4a20'; c.fillRect(6, 10, 4, 2);                      // 口
+  }),
+  zombieShirt: mobTex(c => texNoise(c, 62, 118, 135, .15)),
+  zombiePants: mobTex(c => texNoise(c, 70, 66, 150, .15)),
+};
+
+/* ----- 汎用AABB判定（モブ用） ----- */
+function boxCollides(px, py, pz, hw, hh) {
+  const x0 = Math.floor(px - hw), x1 = Math.floor(px + hw);
+  const y0 = Math.floor(py), y1 = Math.floor(py + hh - 0.01);
+  const z0 = Math.floor(pz - hw), z1 = Math.floor(pz + hw);
+  for (let x = x0; x <= x1; x++)
+    for (let y = y0; y <= y1; y++)
+      for (let z = z0; z <= z1; z++)
+        if (isSolid(getBlock(x, y, z))) return true;
+  return false;
+}
+
+/* ----- モブ生成（箱モデル組み立て） ----- */
+function spawnMob(type, x, y, z) {
+  const T = MOB_TYPES[type];
+  if (boxCollides(x, y, z, T.hw, T.hh)) return;
+  const m = {
+    type, pos: new THREE.Vector3(x, y, z),
+    vy: 0, yaw: Math.random() * Math.PI * 2,
+    state: 'idle', t: Math.random() * 2,
+    hp: T.hp, kx: 0, kz: 0, flash: 0, hurtCd: 0,
+    walkPhase: 0, onGround: false, dying: undefined,
+    mats: [], legs: [], arms: [],
+  };
+  const g = new THREE.Group();
+  const M = tex => { const mm = new THREE.MeshBasicMaterial({ map: tex }); m.mats.push(mm); return mm; };
+  // faceTexありなら -z 面（正面）だけ顔テクスチャに
+  const box = (w, h, d, px, py, pz, tex, faceTex) => {
+    let mat;
+    if (faceTex) { const s = M(tex), f = M(faceTex); mat = [s, s, s, s, s, f]; }
+    else mat = M(tex);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    mesh.position.set(px, py, pz);
+    g.add(mesh);
+    return mesh;
+  };
+
+  if (type === 'pig') {
+    box(0.62, 0.5, 1.0, 0, 0.62, 0.05, MOB_TEX.pigSkin);                      // 胴
+    box(0.5, 0.5, 0.5, 0, 0.72, -0.62, MOB_TEX.pigSkin, MOB_TEX.pigFace);     // 頭
+    for (const [lx, lz] of [[-0.18, -0.3], [0.18, -0.3], [-0.18, 0.32], [0.18, 0.32]])
+      m.legs.push(box(0.2, 0.38, 0.2, lx, 0.19, lz, MOB_TEX.pigSkin));
+  } else if (type === 'sheep') {
+    box(0.72, 0.62, 1.05, 0, 0.88, 0.05, MOB_TEX.sheepWool);                  // 胴
+    box(0.42, 0.42, 0.45, 0, 1.12, -0.68, MOB_TEX.sheepWool, MOB_TEX.sheepFace); // 頭
+    for (const [lx, lz] of [[-0.2, -0.32], [0.2, -0.32], [-0.2, 0.36], [0.2, 0.36]])
+      m.legs.push(box(0.18, 0.56, 0.18, lx, 0.28, lz, MOB_TEX.sheepLeg));
+  } else if (type === 'zombie') {
+    m.legs.push(box(0.24, 0.75, 0.24, -0.13, 0.375, 0, MOB_TEX.zombiePants));
+    m.legs.push(box(0.24, 0.75, 0.24, 0.13, 0.375, 0, MOB_TEX.zombiePants));
+    box(0.5, 0.62, 0.26, 0, 1.06, 0, MOB_TEX.zombieShirt);                    // 胴
+    box(0.5, 0.5, 0.5, 0, 1.62, 0, MOB_TEX.zombieSkin, MOB_TEX.zombieFace);   // 頭
+    m.arms.push(box(0.2, 0.2, 0.62, -0.35, 1.3, -0.28, MOB_TEX.zombieSkin));  // 前ならえの腕
+    m.arms.push(box(0.2, 0.2, 0.62, 0.35, 1.3, -0.28, MOB_TEX.zombieSkin));
+  }
+
+  m.group = g;
+  g.position.copy(m.pos);
+  scene.add(g);
+  MOBS.push(m);
+}
+
+function removeMob(i) {
+  const m = MOBS[i];
+  m.group.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+  scene.remove(m.group);
+  MOBS.splice(i, 1);
+}
+
+/* ----- モブの物理移動 ----- */
+function mobMove(m, axis, d, T) {
+  if (d === 0) return false;
+  const n = Math.ceil(Math.abs(d) / 0.05), inc = d / n;
+  for (let i = 0; i < n; i++) {
+    m.pos[axis] += inc;
+    if (boxCollides(m.pos.x, m.pos.y, m.pos.z, T.hw, T.hh)) {
+      m.pos[axis] -= inc;
+      if (axis === 'y') {
+        if (d < 0) m.onGround = true;
+        m.vy = 0;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ----- モブAI・更新 ----- */
+function updateMob(m, dt) {
+  const T = MOB_TYPES[m.type];
+
+  if (m.dying !== undefined) { // 死亡演出（倒れて縮む）
+    m.dying -= dt;
+    m.group.rotation.z += dt * 6;
+    m.group.scale.setScalar(Math.max(0.01, m.dying * 2));
+    return;
+  }
+
+  m.t -= dt;
+  m.hurtCd -= dt;
+  let speed = 0;
+  const dpx = player.pos.x - m.pos.x, dpz = player.pos.z - m.pos.z;
+  const distP = Math.hypot(dpx, dpz);
+
+  if (T.hostile && curBright < 0.45 && distP < 24) {
+    // 夜のゾンビ：プレイヤーを追跡
+    m.yaw = Math.atan2(-dpx, -dpz);
+    speed = T.speed * 1.6;
+    if (distP < 1.2 && m.hurtCd <= 0) {
+      m.hurtCd = 1.0;
+      damagePlayer(1, dpx / (distP || 1), dpz / (distP || 1));
+    }
+  } else {
+    // 放浪：歩く⇔立ち止まるを繰り返す
+    if (m.t <= 0) {
+      if (m.state === 'walk') { m.state = 'idle'; m.t = 1 + Math.random() * 2.5; }
+      else { m.state = 'walk'; m.yaw = Math.random() * Math.PI * 2; m.t = 1.5 + Math.random() * 3; }
+    }
+    if (m.state === 'walk') speed = T.speed;
+  }
+
+  // ノックバック減衰
+  m.kx -= m.kx * Math.min(1, dt * 5);
+  m.kz -= m.kz * Math.min(1, dt * 5);
+
+  // 重力・水の浮力
+  const inW = getBlock(Math.floor(m.pos.x), Math.floor(m.pos.y + 0.3), Math.floor(m.pos.z)) === 5;
+  if (inW) m.vy = Math.min(m.vy + 12 * dt, 2.5);
+  else { m.vy -= GRAVITY * dt; if (m.vy < -40) m.vy = -40; }
+
+  const dx = -Math.sin(m.yaw) * speed * dt + m.kx * dt;
+  const dz = -Math.cos(m.yaw) * speed * dt + m.kz * dt;
+  const wasGround = m.onGround;
+  m.onGround = false;
+  const bx = mobMove(m, 'x', dx, T);
+  const bz = mobMove(m, 'z', dz, T);
+  mobMove(m, 'y', m.vy * dt, T);
+  if ((bx || bz) && (wasGround || m.onGround)) m.vy = 8.2; // 段差ジャンプ
+
+  // 歩行アニメ（脚を振る）
+  if (speed > 0) m.walkPhase += dt * speed * 3.5;
+  const sw = speed > 0 ? Math.sin(m.walkPhase) * 0.55 : 0;
+  m.legs.forEach((l, i) => l.rotation.x = i % 2 ? sw : -sw);
+  m.arms.forEach(a => a.rotation.x = Math.sin(m.walkPhase) * 0.12);
+
+  m.group.position.copy(m.pos);
+  m.group.rotation.y = m.yaw;
+
+  // 昼夜の明るさ＋被弾フラッシュ
+  m.flash -= dt;
+  for (const mat of m.mats) {
+    if (m.flash > 0) mat.color.setRGB(1, 0.35, 0.35);
+    else mat.color.setScalar(curBright);
+  }
+}
+
+function updateMobs(dt) {
+  for (let i = MOBS.length - 1; i >= 0; i--) {
+    const m = MOBS[i];
+    updateMob(m, dt);
+    const d = Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z);
+    if ((m.dying !== undefined && m.dying <= 0) || d > 70 || m.pos.y < -15) removeMob(i);
+  }
+}
+
+/* ----- スポーン ----- */
+let spawnTimer = 0;
+function trySpawn(dt) {
+  spawnTimer -= dt;
+  if (spawnTimer > 0) return;
+  spawnTimer = 2.2;
+
+  let animals = 0, zombies = 0;
+  for (const m of MOBS) MOB_TYPES[m.type].hostile ? zombies++ : animals++;
+
+  const a = Math.random() * Math.PI * 2, r = 14 + Math.random() * 16;
+  const x = Math.floor(player.pos.x + Math.sin(a) * r);
+  const z = Math.floor(player.pos.z + Math.cos(a) * r);
+  const c = column(x, z);
+
+  if (animals < ANIMAL_CAP && c.h > WATER + 1)
+    spawnMob(Math.random() < 0.5 ? 'pig' : 'sheep', x + 0.5, c.h + 1, z + 0.5);
+
+  if (curBright < 0.4 && zombies < ZOMBIE_CAP && c.h > WATER)
+    spawnMob('zombie', x + 0.5, c.h + 1, z + 0.5);
+
+  // 朝になったらゾンビは消滅
+  if (curBright > 0.55)
+    for (const m of MOBS)
+      if (MOB_TYPES[m.type].hostile && m.dying === undefined) m.dying = 0.4;
+}
+
+/* ----- 攻撃（レイ vs モブAABB） ----- */
+function rayAABB(o, d, minx, miny, minz, maxx, maxy, maxz) {
+  let tmin = 0, tmax = REACH;
+  const o3 = [o.x, o.y, o.z], d3 = [d.x, d.y, d.z];
+  const mn = [minx, miny, minz], mx = [maxx, maxy, maxz];
+  for (let i = 0; i < 3; i++) {
+    const inv = 1 / d3[i];
+    let t1 = (mn[i] - o3[i]) * inv, t2 = (mx[i] - o3[i]) * inv;
+    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+  }
+  return tmin <= tmax ? tmin : null;
+}
+
+function raycastMob() {
+  camera.getWorldDirection(_dir);
+  const o = camera.position;
+  const blockHit = raycast();
+  let best = null, bt = blockHit ? blockHit.t : REACH;
+  for (const m of MOBS) {
+    if (m.dying !== undefined) continue;
+    const T = MOB_TYPES[m.type];
+    const t = rayAABB(o, _dir,
+      m.pos.x - T.hw, m.pos.y, m.pos.z - T.hw,
+      m.pos.x + T.hw, m.pos.y + T.hh, m.pos.z + T.hw);
+    if (t !== null && t < bt) { bt = t; best = m; }
+  }
+  return best;
+}
+
+function hitMob(m) {
+  m.hp -= 2;
+  m.flash = 0.18;
+  let dx = m.pos.x - player.pos.x, dz = m.pos.z - player.pos.z;
+  const l = Math.hypot(dx, dz) || 1;
+  m.kx = dx / l * 7; m.kz = dz / l * 7;
+  m.vy = 4.5;
+  m.hurtCd = Math.max(m.hurtCd, 0.4);
+  sfx(220, 90, 0.12, 'square', 0.14);
+  if (m.hp <= 0) {
+    m.dying = 0.5;
+    sfx(160, 40, 0.3, 'sawtooth', 0.12);
+  }
+}
+
+/* ----- プレイヤー体力 ----- */
+let hp = 10, lastHurtT = -99, regenT = 0, gameT = 0;
+const heartsEl = document.getElementById('hearts');
+const hurtfxEl = document.getElementById('hurtfx');
+
+function updateHearts() {
+  heartsEl.innerHTML = '❤'.repeat(hp) + '<span class="e">' + '❤'.repeat(Math.max(0, 10 - hp)) + '</span>';
+}
+updateHearts();
+
+function showMsg(text) {
+  itemnameEl.textContent = text;
+  itemnameEl.style.opacity = 1;
+  clearTimeout(nameTimer);
+  nameTimer = setTimeout(() => itemnameEl.style.opacity = 0, 2500);
+}
+
+function damagePlayer(n, kx, kz) {
+  hp -= n;
+  lastHurtT = gameT;
+  hurtfxEl.style.transition = 'none';
+  hurtfxEl.style.opacity = 1;
+  requestAnimationFrame(() => {
+    hurtfxEl.style.transition = 'opacity .4s';
+    hurtfxEl.style.opacity = 0;
+  });
+  sfx(140, 60, 0.2, 'sawtooth', 0.18);
+  player.vel.y = 5;
+  moveAxis('x', kx * 0.8);
+  moveAxis('z', kz * 0.8);
+  if (hp <= 0) {
+    hp = 10;
+    player.pos.set(8.5, column(8, 8).h + 2, 8.5);
+    player.vel.set(0, 0, 0);
+    showMsg('💀 やられてしまった！スポーン地点に戻ります');
+  }
+  updateHearts();
+}
+
+function regenHP(dt) {
+  if (hp < 10 && gameT - lastHurtT > 6) {
+    regenT += dt;
+    if (regenT > 3) { regenT = 0; hp++; updateHearts(); }
+  } else regenT = 0;
+}
+
 /* ===================== 昼夜サイクル ===================== */
 const dayColor = new THREE.Color(0x87ceeb);
 const nightColor = new THREE.Color(0x0b1228);
@@ -738,6 +1081,7 @@ function updateDayNight(dt) {
   dayTime = (dayTime + dt) % DAY_LENGTH;
   const sun = Math.sin(dayTime / DAY_LENGTH * Math.PI * 2); // 1=正午 -1=深夜
   const b = Math.max(0.22, Math.min(1, sun * 1.4 + 0.5));
+  curBright = b;
   skyColor.copy(nightColor).lerp(dayColor, (b - 0.22) / 0.78);
   renderer.setClearColor(skyColor);
   scene.fog.color.copy(skyColor);
@@ -883,7 +1227,13 @@ const clock = new THREE.Clock();
 function loop() {
   requestAnimationFrame(loop);
   const dt = Math.min(clock.getDelta(), 0.05);
-  if (playing()) physics(dt);
+  gameT += dt;
+  if (playing()) {
+    physics(dt);
+    updateMobs(dt);
+    trySpawn(dt);
+    regenHP(dt);
+  }
   updateChunks();
   updateHighlight();
   updateDayNight(dt);
@@ -898,5 +1248,12 @@ lastPCZ = Math.floor(player.pos.z / CS);
 for (let i = 0; i < 9 && buildQueue.length; i++) {
   const [cx, cz] = buildQueue.shift();
   buildChunk(cx, cz);
+}
+// 初期スポーン：周辺に動物を数匹
+for (let i = 0; i < 5; i++) {
+  const a = Math.random() * Math.PI * 2, r = 7 + Math.random() * 12;
+  const x = Math.floor(8.5 + Math.sin(a) * r), z = Math.floor(8.5 + Math.cos(a) * r);
+  const c = column(x, z);
+  if (c.h > WATER + 1) spawnMob(i % 2 ? 'pig' : 'sheep', x + 0.5, c.h + 1, z + 0.5);
 }
 loop();

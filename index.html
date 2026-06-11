@@ -62,11 +62,26 @@
   body.touch .slot canvas { width:26px; height:26px; }
   body.touch .slot .num { display:none; }
   #itemname {
-    position:fixed; left:50%; bottom:78px; transform:translateX(-50%);
+    position:fixed; left:50%; bottom:100px; transform:translateX(-50%);
     color:#fff; font-size:15px; text-shadow:1px 1px 2px #000; z-index:10;
     opacity:0; transition:opacity .4s; pointer-events:none;
   }
-  body.touch #itemname { bottom:54px; }
+  body.touch #itemname { bottom:74px; }
+
+  /* ===== 体力（ハート） ===== */
+  #hearts {
+    position:fixed; left:50%; bottom:76px; transform:translateX(-50%);
+    z-index:10; font-size:17px; color:#ff3b3b; letter-spacing:2px;
+    text-shadow:1px 1px 1px #000; pointer-events:none; display:none;
+  }
+  #hearts .e { color:rgba(50,50,50,.8); }
+  body.touch #hearts { bottom:52px; font-size:13px; letter-spacing:1px; }
+
+  /* ===== 被ダメージの赤フラッシュ ===== */
+  #hurtfx {
+    position:fixed; inset:0; background:rgba(255,0,0,.34); z-index:6;
+    opacity:0; transition:opacity .4s; pointer-events:none;
+  }
 
   /* ===== HUD ===== */
   #hud {
@@ -115,8 +130,10 @@
 </head>
 <body>
 <div id="waterfx"></div>
+<div id="hurtfx"></div>
 <div id="crosshair" style="display:none"></div>
 <div id="itemname"></div>
+<div id="hearts"></div>
 <div id="hotbar" style="display:none"></div>
 <div id="hud" style="display:none"></div>
 
