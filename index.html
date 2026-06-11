@@ -2,11 +2,12 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>⛏ クラフトワールド</title>
 <style>
-  * { margin:0; padding:0; box-sizing:border-box; }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { width:100%; height:100%; overflow:hidden; background:#000; font-family:"Segoe UI",Meiryo,sans-serif; }
-  canvas#game { display:block; }
+  canvas#game { display:block; touch-action:none; }
 
   /* ===== スタート / ポーズ画面 ===== */
   #overlay {
@@ -20,8 +21,11 @@
   #overlay .help {
     background:rgba(0,0,0,.45); border:2px solid #555; border-radius:8px;
     padding:16px 26px; line-height:2; font-size:14px; margin-bottom:24px; text-align:left;
+    max-width:92vw;
   }
   #overlay .help b { color:#ffd966; }
+  body.touch .help.kb { display:none; }
+  body:not(.touch) .help.touch { display:none; }
   #overlay button {
     font-size:18px; padding:12px 40px; margin:6px; cursor:pointer;
     background:#6aaa46; color:#fff; border:none; border-radius:6px;
@@ -53,11 +57,16 @@
   .slot.sel { border-color:#fff; box-shadow:0 0 8px rgba(255,255,255,.7); }
   .slot canvas { image-rendering:pixelated; }
   .slot .num { position:absolute; top:1px; left:4px; font-size:10px; color:#ccc; text-shadow:1px 1px 0 #000; }
+  body.touch #hotbar { pointer-events:auto; gap:3px; bottom:8px; }
+  body.touch .slot { width:38px; height:38px; border-width:2px; }
+  body.touch .slot canvas { width:26px; height:26px; }
+  body.touch .slot .num { display:none; }
   #itemname {
     position:fixed; left:50%; bottom:78px; transform:translateX(-50%);
     color:#fff; font-size:15px; text-shadow:1px 1px 2px #000; z-index:10;
     opacity:0; transition:opacity .4s; pointer-events:none;
   }
+  body.touch #itemname { bottom:54px; }
 
   /* ===== HUD ===== */
   #hud {
@@ -66,9 +75,42 @@
     background:rgba(0,0,0,.3); padding:8px 12px; border-radius:6px; line-height:1.7;
     pointer-events:none;
   }
+  body.touch #hud { font-size:10px; padding:5px 8px; }
 
   /* ===== 水中エフェクト ===== */
   #waterfx { position:fixed; inset:0; background:rgba(20,60,160,.35); z-index:5; display:none; pointer-events:none; }
+
+  /* ===== モバイル操作UI ===== */
+  #touchUI { position:fixed; inset:0; z-index:11; pointer-events:none; display:none; }
+  #joyBase {
+    position:absolute; left:20px; bottom:100px; width:128px; height:128px;
+    border-radius:50%; background:rgba(255,255,255,.12);
+    border:2px solid rgba(255,255,255,.35);
+    pointer-events:auto; touch-action:none;
+  }
+  #joyStick {
+    position:absolute; left:50%; top:50%; width:54px; height:54px; margin:-27px 0 0 -27px;
+    border-radius:50%; background:rgba(255,255,255,.5); pointer-events:none;
+  }
+  .tbtn {
+    position:absolute; width:60px; height:60px; border-radius:50%;
+    background:rgba(0,0,0,.4); border:2px solid rgba(255,255,255,.55); color:#fff;
+    font-size:26px; pointer-events:auto; touch-action:none;
+    user-select:none; -webkit-user-select:none;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .tbtn:active, .tbtn.on { background:rgba(255,255,255,.35); }
+  #btnPlace { right:22px;  bottom:178px; }
+  #btnBreak { right:104px; bottom:150px; }
+  #btnJump  { right:60px;  bottom:80px; }
+  #btnDown  { right:142px; bottom:80px; display:none; }
+  #btnFly   { right:22px;  bottom:262px; font-size:22px; }
+  #btnPause {
+    position:absolute; top:10px; right:10px; width:46px; height:46px;
+    border-radius:10px; background:rgba(0,0,0,.4); border:2px solid rgba(255,255,255,.55);
+    color:#fff; font-size:20px; pointer-events:auto; touch-action:none;
+    display:flex; align-items:center; justify-content:center;
+  }
 </style>
 </head>
 <body>
@@ -78,14 +120,31 @@
 <div id="hotbar" style="display:none"></div>
 <div id="hud" style="display:none"></div>
 
+<div id="touchUI">
+  <div id="joyBase"><div id="joyStick"></div></div>
+  <button class="tbtn" id="btnBreak">⛏</button>
+  <button class="tbtn" id="btnPlace">🧱</button>
+  <button class="tbtn" id="btnJump">⬆</button>
+  <button class="tbtn" id="btnDown">⬇</button>
+  <button class="tbtn" id="btnFly">✈</button>
+  <button id="btnPause">⏸</button>
+</div>
+
 <div id="overlay">
   <h1>⛏ クラフトワールド</h1>
   <div class="sub">Minecraft風 ボクセルサンドボックス</div>
-  <div class="help">
+  <div class="help kb">
     <b>WASD</b>：移動　<b>Space</b>：ジャンプ　<b>Shift</b>：スニーク（低速）<br>
     <b>F</b>：飛行モード切替（飛行中は Space↑ / Shift↓）<br>
     <b>左クリック</b>：ブロック破壊　<b>右クリック</b>：設置　<b>中クリック</b>：スポイト<br>
     <b>1〜9 / ホイール</b>：ブロック選択　<b>Esc</b>：メニュー<br>
+    ※ 世界はこのブラウザに自動保存されます
+  </div>
+  <div class="help touch">
+    <b>左のパッド</b>：移動　<b>画面ドラッグ</b>：視点<br>
+    <b>⛏</b>：破壊（長押しで連続）　<b>🧱</b>：設置　<b>⬆</b>：ジャンプ<br>
+    <b>✈</b>：飛行切替（飛行中は ⬆上昇 / ⬇下降）<br>
+    <b>ホットバー</b>：タップでブロック選択　<b>⏸</b>：メニュー<br>
     ※ 世界はこのブラウザに自動保存されます
   </div>
   <button id="playBtn">プレイ開始</button>

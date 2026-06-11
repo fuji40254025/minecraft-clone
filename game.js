@@ -16,6 +16,10 @@ const FLY_SPEED = 12;
 const REACH = 6.5;        // ブロックに届く距離
 const DAY_LENGTH = 480;   // 昼夜1周（秒）
 
+// タッチ端末判定（主入力が指＝スマホ・タブレット）
+const isTouch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0 && !matchMedia('(pointer: fine)').matches;
+if (isTouch) document.body.classList.add('touch');
+
 /* ===================== シード・乱数・ノイズ ===================== */
 let seed = parseFloat(localStorage.getItem('mc_seed'));
 if (!seed) {
@@ -433,10 +437,12 @@ function moveAxis(axis, d) {
 }
 
 const keys = new Set();
+const joy = { id: null, x: 0, y: 0 };   // バーチャルパッド入力（-1〜1）
+const look = { id: null, x: 0, y: 0 };  // 視点ドラッグ中のタッチ
 addEventListener('keydown', e => {
   if (e.repeat) return;
   keys.add(e.code);
-  if (e.code === 'KeyF' && locked()) {
+  if (e.code === 'KeyF' && playing()) {
     player.fly = !player.fly;
     player.vel.y = 0;
   }
@@ -460,8 +466,12 @@ function physics(dt) {
   if (keys.has('KeyS')) { mx -= fwdX; mz -= fwdZ; }
   if (keys.has('KeyD')) { mx += rightX; mz += rightZ; }
   if (keys.has('KeyA')) { mx -= rightX; mz -= rightZ; }
+  if (joy.x !== 0 || joy.y !== 0) {
+    mx += fwdX * -joy.y + rightX * joy.x;
+    mz += fwdZ * -joy.y + rightZ * joy.x;
+  }
   const len = Math.hypot(mx, mz);
-  if (len > 0) { mx /= len; mz /= len; }
+  if (len > 1) { mx /= len; mz /= len; }
 
   const water = inWater();
   let speed = player.fly ? FLY_SPEED : WALK_SPEED;
@@ -503,10 +513,29 @@ function physics(dt) {
 
 /* ===================== マウス・ポインターロック ===================== */
 const overlay = document.getElementById('overlay');
+let touchPlaying = false; // スマホはポインターロックを使わない
 function locked() { return document.pointerLockElement === renderer.domElement; }
+function playing() { return locked() || (isTouch && touchPlaying); }
+
+function setUIVisible(on) {
+  overlay.style.display = on ? 'none' : 'flex';
+  document.getElementById('crosshair').style.display = on ? 'block' : 'none';
+  document.getElementById('hotbar').style.display = on ? 'flex' : 'none';
+  document.getElementById('hud').style.display = on ? 'block' : 'none';
+  document.getElementById('touchUI').style.display = (on && isTouch) ? 'block' : 'none';
+  if (!on) { keys.clear(); stopMining(); }
+}
 
 document.getElementById('playBtn').addEventListener('click', () => {
-  renderer.domElement.requestPointerLock();
+  if (isTouch) {
+    touchPlaying = true;
+    setUIVisible(true);
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    try { screen.orientation.lock('landscape').catch(() => {}); } catch (e) {}
+  } else {
+    renderer.domElement.requestPointerLock();
+  }
 });
 document.getElementById('resetBtn').addEventListener('click', () => {
   if (confirm('現在の世界を削除して新しい世界を生成しますか？')) {
@@ -517,12 +546,7 @@ document.getElementById('resetBtn').addEventListener('click', () => {
 });
 
 document.addEventListener('pointerlockchange', () => {
-  const on = locked();
-  overlay.style.display = on ? 'none' : 'flex';
-  document.getElementById('crosshair').style.display = on ? 'block' : 'none';
-  document.getElementById('hotbar').style.display = on ? 'flex' : 'none';
-  document.getElementById('hud').style.display = on ? 'block' : 'none';
-  if (!on) { keys.clear(); stopMining(); }
+  setUIVisible(locked());
 });
 
 addEventListener('mousemove', e => {
@@ -614,7 +638,7 @@ hlBox.visible = false;
 scene.add(hlBox);
 
 function updateHighlight() {
-  const hit = locked() ? raycast() : null;
+  const hit = playing() ? raycast() : null;
   if (hit) {
     hlBox.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
     hlBox.visible = true;
@@ -668,6 +692,11 @@ let nameTimer = null;
     c2.drawImage(atlasCanvas, (tile % 4) * 16, ((tile / 4) | 0) * 16, 16, 16, 0, 0, 32, 32);
     slot.appendChild(num);
     slot.appendChild(cv);
+    slot.addEventListener('pointerdown', e => {
+      if (!isTouch) return;
+      e.preventDefault();
+      selectSlot(i);
+    });
     hotbarEl.appendChild(slot);
   });
 })();
@@ -742,13 +771,119 @@ function updateHUD(dt) {
   waterfxEl.style.display = eyeInWater() ? 'block' : 'none';
 }
 
+/* ===================== タッチ操作（スマホ対応） ===================== */
+if (isTouch) {
+  const joyBase = document.getElementById('joyBase');
+  const joyStick = document.getElementById('joyStick');
+
+  function joyMove(t) {
+    const r = joyBase.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    let dx = (t.clientX - cx) / (r.width / 2);
+    let dy = (t.clientY - cy) / (r.height / 2);
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+    joy.x = dx; joy.y = dy;
+    joyStick.style.transform = `translate(${dx * 38}px, ${dy * 38}px)`;
+  }
+
+  joyBase.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (joy.id === null) {
+      const t = e.changedTouches[0];
+      joy.id = t.identifier;
+      joyMove(t);
+    }
+  }, { passive: false });
+
+  // 画面ドラッグで視点移動（パッド・ボタン以外のタッチ）
+  renderer.domElement.addEventListener('touchstart', e => {
+    if (!playing()) return;
+    e.preventDefault();
+    if (look.id === null) {
+      const t = e.changedTouches[0];
+      look.id = t.identifier;
+      look.x = t.clientX; look.y = t.clientY;
+    }
+  }, { passive: false });
+
+  addEventListener('touchmove', e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === joy.id) {
+        e.preventDefault();
+        joyMove(t);
+      } else if (t.identifier === look.id) {
+        e.preventDefault();
+        player.yaw -= (t.clientX - look.x) * 0.0045;
+        player.pitch -= (t.clientY - look.y) * 0.0045;
+        player.pitch = Math.max(-1.55, Math.min(1.55, player.pitch));
+        look.x = t.clientX; look.y = t.clientY;
+      }
+    }
+  }, { passive: false });
+
+  const endTouch = e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === joy.id) {
+        joy.id = null; joy.x = 0; joy.y = 0;
+        joyStick.style.transform = '';
+      }
+      if (t.identifier === look.id) look.id = null;
+    }
+  };
+  addEventListener('touchend', endTouch);
+  addEventListener('touchcancel', endTouch);
+
+  // 押している間リピートするボタン
+  function bindHold(el, fn, repeat) {
+    let iv = null;
+    el.addEventListener('touchstart', e => {
+      e.preventDefault();
+      fn();
+      if (repeat) { clearInterval(iv); iv = setInterval(fn, 240); }
+    }, { passive: false });
+    const end = e => { e.preventDefault(); clearInterval(iv); iv = null; };
+    el.addEventListener('touchend', end);
+    el.addEventListener('touchcancel', end);
+  }
+
+  // 押している間だけ仮想キーを押すボタン
+  function bindKey(el, code) {
+    el.addEventListener('touchstart', e => { e.preventDefault(); keys.add(code); }, { passive: false });
+    const end = e => { e.preventDefault(); keys.delete(code); };
+    el.addEventListener('touchend', end);
+    el.addEventListener('touchcancel', end);
+  }
+
+  bindHold(document.getElementById('btnBreak'), doBreak, true);
+  bindHold(document.getElementById('btnPlace'), doPlace, true);
+  bindKey(document.getElementById('btnJump'), 'Space');
+  bindKey(document.getElementById('btnDown'), 'ShiftLeft');
+
+  const btnFly = document.getElementById('btnFly');
+  const btnDown = document.getElementById('btnDown');
+  btnFly.addEventListener('touchstart', e => {
+    e.preventDefault();
+    player.fly = !player.fly;
+    player.vel.y = 0;
+    btnFly.classList.toggle('on', player.fly);
+    btnDown.style.display = player.fly ? 'flex' : 'none';
+  }, { passive: false });
+
+  document.getElementById('btnPause').addEventListener('touchstart', e => {
+    e.preventDefault();
+    touchPlaying = false;
+    setUIVisible(false);
+  }, { passive: false });
+}
+
 /* ===================== メインループ ===================== */
 const clock = new THREE.Clock();
 
 function loop() {
   requestAnimationFrame(loop);
   const dt = Math.min(clock.getDelta(), 0.05);
-  if (locked()) physics(dt);
+  if (playing()) physics(dt);
   updateChunks();
   updateHighlight();
   updateDayNight(dt);
