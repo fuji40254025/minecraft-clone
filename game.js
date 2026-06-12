@@ -57,9 +57,30 @@ const BLOCKS = {
   10: { name: 'レンガ',    all: 11 },
   11: { name: '岩盤',      all: 12 },
   12: { name: '丸石',      all: 13 },
+  13: { name: '作業台',    top: 14, bottom: 9, side: 15 },
 };
 const TRANS = new Set([5, 7, 9]);
-const HOTBAR = [1, 2, 3, 4, 6, 8, 7, 9, 10];
+
+/* ----- アイテム（非ブロック、ID100以降） ----- */
+const ITEMS = {
+  100: { name: '棒' },
+  101: { name: '木の剣', dmg: 3 },
+  102: { name: '石の剣', dmg: 5 },
+};
+function nameOf(id) { return id >= 100 ? ITEMS[id].name : BLOCKS[id].name; }
+
+// 破壊時のドロップ（未定義=ブロック自身、0=なし）
+const DROPS = { 1: 2, 3: 12, 7: 0, 11: 0 };
+function dropOf(id) { const d = DROPS[id]; return d === undefined ? id : d; }
+
+/* ----- クラフトレシピ（形合わせ・0=空マス） ----- */
+const RECIPES = [
+  { p: [[6]],               out: { id: 8,   n: 4 } }, // 原木 → 木材×4
+  { p: [[8], [8]],          out: { id: 100, n: 4 } }, // 木材を縦2 → 棒×4
+  { p: [[8, 8], [8, 8]],    out: { id: 13,  n: 1 } }, // 木材2×2 → 作業台
+  { p: [[8], [8], [100]],   out: { id: 101, n: 1 } }, // 木の剣（要作業台）
+  { p: [[12], [12], [100]], out: { id: 102, n: 1 } }, // 石の剣（要作業台）
+];
 
 function tileFor(id, dy) {
   const b = BLOCKS[id];
@@ -134,6 +155,14 @@ atlasCanvas.width = 64; atlasCanvas.height = 64;
   noiseTile(13, 110, 110, 110, .22);               // 13 丸石
   for (let i = 0; i < 7; i++)
     over(13, (Math.random()*12)|0, 48 % 16 + ((Math.random()*12)|0) - 48 % 16, 3, 3, 'rgba(70,70,70,.4)');
+  noiseTile(14, 160, 130, 80, .07);                // 14 作業台（上面）
+  over(14, 0, 0, 16, 2, 'rgba(90,60,30,.8)'); over(14, 0, 14, 16, 2, 'rgba(90,60,30,.8)');
+  over(14, 0, 0, 2, 16, 'rgba(90,60,30,.8)'); over(14, 14, 0, 2, 16, 'rgba(90,60,30,.8)');
+  over(14, 5, 5, 6, 6, 'rgba(210,180,130,.55)');
+  noiseTile(15, 150, 118, 70, .08);                // 15 作業台（側面）
+  over(15, 0, 0, 16, 2, 'rgba(90,60,30,.8)');
+  over(15, 2, 4, 4, 5, 'rgba(70,45,20,.75)');      // 工具の影
+  over(15, 10, 4, 4, 5, 'rgba(70,45,20,.75)');
 })();
 
 /* ===================== 地形生成 ===================== */
@@ -447,6 +476,14 @@ addEventListener('keydown', e => {
     player.vel.y = 0;
   }
   if (/^Digit[1-9]$/.test(e.code)) selectSlot(parseInt(e.code.slice(5), 10) - 1);
+  if (e.code === 'KeyE') {
+    if (invOpen) closeInventory(true);
+    else if (playing()) openInventory(false);
+  }
+  if (e.code === 'Escape' && invOpen) {
+    closeInventory(false);
+    if (!isTouch) setUIVisible(false);
+  }
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
@@ -514,8 +551,9 @@ function physics(dt) {
 /* ===================== マウス・ポインターロック ===================== */
 const overlay = document.getElementById('overlay');
 let touchPlaying = false; // スマホはポインターロックを使わない
+let hintShown = false;
 function locked() { return document.pointerLockElement === renderer.domElement; }
-function playing() { return locked() || (isTouch && touchPlaying); }
+function playing() { return !invOpen && (locked() || (isTouch && touchPlaying)); }
 
 function setUIVisible(on) {
   overlay.style.display = on ? 'none' : 'flex';
@@ -525,6 +563,10 @@ function setUIVisible(on) {
   document.getElementById('hearts').style.display = on ? 'block' : 'none';
   document.getElementById('touchUI').style.display = (on && isTouch) ? 'block' : 'none';
   if (!on) { keys.clear(); stopMining(); }
+  if (on && !hintShown) {
+    hintShown = true;
+    if (inv.every(s => !s)) showMsg('🌳 まずは木を殴って原木を集めよう！');
+  }
 }
 
 document.getElementById('playBtn').addEventListener('click', () => {
@@ -547,6 +589,7 @@ document.getElementById('resetBtn').addEventListener('click', () => {
 });
 
 document.addEventListener('pointerlockchange', () => {
+  if (invOpen) return; // インベントリを開くためのロック解除ではメニューを出さない
   setUIVisible(locked());
 });
 
@@ -584,30 +627,41 @@ function blockIntersectsPlayer(bx, by, bz) {
 }
 
 function doBreak() {
+  if (invOpen) return;
   // モブが照準上にいれば攻撃を優先
   const m = raycastMob();
   if (m) { hitMob(m); return; }
   const hit = raycast();
   if (!hit || hit.id === 11) return; // 岩盤は壊せない
   setBlock(hit.x, hit.y, hit.z, 0);
+  const d = dropOf(hit.id);
+  if (d) give(d, 1); // ドロップを持ち物へ
   sfx(170, 55, 0.12, 'square', 0.12);
 }
 
 function doPlace() {
+  if (invOpen) return;
   const hit = raycast();
-  if (!hit || hit.px === null) return;
+  if (!hit) return;
+  if (hit.id === 13) { openInventory(true); return; } // 作業台を開く
+  if (hit.px === null) return;
+  const s = inv[player.sel];
+  if (!s || s.id >= 100) return; // ブロックだけ設置できる
   const cur = getBlock(hit.px, hit.py, hit.pz);
   if (cur !== 0 && cur !== 5) return;
   if (blockIntersectsPlayer(hit.px, hit.py, hit.pz)) return;
-  setBlock(hit.px, hit.py, hit.pz, HOTBAR[player.sel]);
+  setBlock(hit.px, hit.py, hit.pz, s.id);
+  s.n--;
+  if (s.n <= 0) inv[player.sel] = null;
+  slotsChanged();
   sfx(95, 150, 0.07, 'sine', 0.14);
 }
 
 function doPick() {
   const hit = raycast();
   if (!hit) return;
-  const i = HOTBAR.indexOf(hit.id);
-  if (i >= 0) selectSlot(i);
+  for (let i = 0; i < 9; i++)
+    if (inv[i] && inv[i].id === hit.id) { selectSlot(i); return; }
 }
 
 let mineTimer = null;
@@ -632,7 +686,7 @@ addEventListener('mouseup', stopMining);
 addEventListener('contextmenu', e => e.preventDefault());
 addEventListener('wheel', e => {
   if (!locked()) return;
-  selectSlot((player.sel + (e.deltaY > 0 ? 1 : -1) + HOTBAR.length) % HOTBAR.length);
+  selectSlot((player.sel + (e.deltaY > 0 ? 1 : -1) + 9) % 9);
 });
 
 /* ----- ターゲットのハイライト枠 ----- */
@@ -652,37 +706,144 @@ function updateHighlight() {
 }
 
 /* ===================== 手持ちブロック表示 ===================== */
-let heldMesh = null;
+let heldMesh = null, heldShownId = -1;
 function updateHeld() {
+  const s = inv[player.sel];
+  const id = s ? s.id : 0;
+  heldShownId = id;
   if (heldMesh) {
     camera.remove(heldMesh);
     heldMesh.geometry.dispose();
+    if (heldMesh.userData.ownMat) heldMesh.material.dispose();
     heldMesh = null;
   }
-  const id = HOTBAR[player.sel];
-  const buf = { pos: [], uv: [], col: [], idx: [] };
-  for (const face of FACES) {
-    pushFace(buf, face, -0.5, -0.5, -0.5, tileFor(id, face.dir[1]));
+  if (!id) return;
+  if (id < 100) {
+    // ブロック：ミニキューブ
+    const buf = { pos: [], uv: [], col: [], idx: [] };
+    for (const face of FACES) {
+      pushFace(buf, face, -0.5, -0.5, -0.5, tileFor(id, face.dir[1]));
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(buf.pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(buf.uv, 2));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(buf.col, 3));
+    g.setIndex(buf.idx);
+    heldMesh = new THREE.Mesh(g, TRANS.has(id) ? matTrans : matOpaque);
+    heldMesh.scale.setScalar(0.34);
+    heldMesh.position.set(0.42, -0.38, -0.65);
+    heldMesh.rotation.set(0.1, Math.PI / 5, 0);
+  } else {
+    // 道具：ドット絵スプライト
+    const g = new THREE.PlaneGeometry(1, 1);
+    const mat = new THREE.MeshBasicMaterial({
+      map: itemTexture(id), transparent: true, alphaTest: 0.1, side: THREE.DoubleSide,
+    });
+    heldMesh = new THREE.Mesh(g, mat);
+    heldMesh.userData.ownMat = true;
+    heldMesh.scale.setScalar(0.55);
+    heldMesh.position.set(0.45, -0.32, -0.62);
+    heldMesh.rotation.set(0, -0.5, 0.5);
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(buf.pos, 3));
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(buf.uv, 2));
-  g.setAttribute('color', new THREE.Float32BufferAttribute(buf.col, 3));
-  g.setIndex(buf.idx);
-  heldMesh = new THREE.Mesh(g, TRANS.has(id) ? matTrans : matOpaque);
-  heldMesh.scale.setScalar(0.34);
-  heldMesh.position.set(0.42, -0.38, -0.65);
-  heldMesh.rotation.set(0.1, Math.PI / 5, 0);
   camera.add(heldMesh);
 }
 
-/* ===================== ホットバーUI ===================== */
+/* ===================== インベントリ＆クラフト ===================== */
 const hotbarEl = document.getElementById('hotbar');
 const itemnameEl = document.getElementById('itemname');
 let nameTimer = null;
 
+/* ----- アイテムのドット絵アイコン ----- */
+const itemIconCache = {};
+function itemCanvas(id) {
+  if (itemIconCache[id]) return itemIconCache[id];
+  const cv = document.createElement('canvas');
+  cv.width = 16; cv.height = 16;
+  const c = cv.getContext('2d');
+  const px = (x, y, col) => { c.fillStyle = col; c.fillRect(x, y, 1, 1); };
+  if (id === 100) { // 棒
+    for (let i = 0; i < 9; i++) { px(4 + i, 11 - i, '#8a6432'); px(5 + i, 11 - i, '#6e4f26'); }
+  } else if (id === 101 || id === 102) { // 剣
+    const blade = id === 101 ? '#c8a05a' : '#9a9a9a';
+    const edge = id === 101 ? '#e6c47e' : '#c8c8c8';
+    for (let i = 0; i < 8; i++) { px(6 + i, 9 - i, blade); px(7 + i, 9 - i, edge); }
+    px(5, 11, '#332211'); px(6, 10, '#332211'); px(7, 11, '#332211'); px(6, 12, '#332211'); // つば
+    px(4, 12, '#6e4f26'); px(3, 13, '#6e4f26'); px(2, 14, '#55401e');                       // 柄
+  }
+  itemIconCache[id] = cv;
+  return cv;
+}
+const itemTexCache = {};
+function itemTexture(id) {
+  if (!itemTexCache[id]) {
+    const t = new THREE.CanvasTexture(itemCanvas(id));
+    t.magFilter = THREE.NearestFilter;
+    t.minFilter = THREE.NearestFilter;
+    t.generateMipmaps = false;
+    itemTexCache[id] = t;
+  }
+  return itemTexCache[id];
+}
+function drawIcon(c2, id) {
+  c2.clearRect(0, 0, 32, 32);
+  if (!id) return;
+  c2.imageSmoothingEnabled = false;
+  if (id < 100) {
+    const tile = tileFor(id, 0);
+    c2.drawImage(atlasCanvas, (tile % 4) * 16, ((tile / 4) | 0) * 16, 16, 16, 0, 0, 32, 32);
+  } else {
+    c2.drawImage(itemCanvas(id), 0, 0, 32, 32);
+  }
+}
+
+/* ----- 持ち物（0〜8がホットバー、9〜26がカバン） ----- */
+const INV_SIZE = 27;
+const inv = new Array(INV_SIZE).fill(null);
+try {
+  const si = JSON.parse(localStorage.getItem('mc_inv') || 'null');
+  if (si) si.forEach((v, i) => { if (v && i < INV_SIZE) inv[i] = { id: v[0], n: v[1] }; });
+} catch (e) {}
+
+let invSaveT = null;
+function saveInvSoon() {
+  clearTimeout(invSaveT);
+  invSaveT = setTimeout(() => {
+    try { localStorage.setItem('mc_inv', JSON.stringify(inv.map(s => s ? [s.id, s.n] : 0))); } catch (e) {}
+  }, 600);
+}
+
+function slotsChanged() {
+  updateHotbarUI();
+  if (invOpen) renderInv();
+  saveInvSoon();
+}
+
+function canHold(id, n) {
+  let space = 0;
+  for (const s of inv) {
+    if (!s) space += 64;
+    else if (s.id === id) space += 64 - s.n;
+    if (space >= n) return true;
+  }
+  return false;
+}
+
+function give(id, n) {
+  let left = n;
+  for (let i = 0; i < INV_SIZE && left > 0; i++) {
+    const s = inv[i];
+    if (s && s.id === id && s.n < 64) { const a = Math.min(64 - s.n, left); s.n += a; left -= a; }
+  }
+  for (let i = 0; i < INV_SIZE && left > 0; i++) {
+    if (!inv[i]) { const a = Math.min(64, left); inv[i] = { id, n: a }; left -= a; }
+  }
+  if (left > 0) showMsg('⚠ 持ち物がいっぱい！');
+  slotsChanged();
+}
+
+/* ----- ホットバーUI ----- */
 (function buildHotbarUI() {
-  HOTBAR.forEach((id, i) => {
+  for (let i = 0; i < 9; i++) {
     const slot = document.createElement('div');
     slot.className = 'slot';
     const num = document.createElement('span');
@@ -690,30 +851,206 @@ let nameTimer = null;
     num.textContent = i + 1;
     const cv = document.createElement('canvas');
     cv.width = 32; cv.height = 32;
-    const c2 = cv.getContext('2d');
-    c2.imageSmoothingEnabled = false;
-    const tile = tileFor(id, 0); // 側面タイルをアイコンに
-    c2.drawImage(atlasCanvas, (tile % 4) * 16, ((tile / 4) | 0) * 16, 16, 16, 0, 0, 32, 32);
+    const cnt = document.createElement('span');
+    cnt.className = 'cnt';
     slot.appendChild(num);
     slot.appendChild(cv);
+    slot.appendChild(cnt);
     slot.addEventListener('pointerdown', e => {
       if (!isTouch) return;
       e.preventDefault();
       selectSlot(i);
     });
     hotbarEl.appendChild(slot);
-  });
+  }
 })();
+
+function updateHotbarUI() {
+  for (let i = 0; i < 9; i++) {
+    const el = hotbarEl.children[i];
+    const s = inv[i];
+    drawIcon(el.querySelector('canvas').getContext('2d'), s ? s.id : 0);
+    el.querySelector('.cnt').textContent = s && s.n > 1 ? s.n : '';
+  }
+  const cur = inv[player.sel];
+  if ((cur ? cur.id : 0) !== heldShownId) updateHeld();
+}
 
 function selectSlot(i) {
   player.sel = i;
   [...hotbarEl.children].forEach((el, j) => el.classList.toggle('sel', j === i));
   updateHeld();
-  itemnameEl.textContent = BLOCKS[HOTBAR[i]].name;
-  itemnameEl.style.opacity = 1;
-  clearTimeout(nameTimer);
-  nameTimer = setTimeout(() => itemnameEl.style.opacity = 0, 1200);
+  const s = inv[i];
+  if (s) showMsg(nameOf(s.id));
 }
+
+/* ----- インベントリ／クラフト画面 ----- */
+let invOpen = false, craftSize = 2, curRecipe = null, selPick = null;
+const craft = new Array(9).fill(null); // 3×3固定、2×2時は左上の4マスだけ使う
+const invScreen = document.getElementById('invScreen');
+const craftGridEl = document.getElementById('craftGrid');
+const bagGridEl = document.getElementById('bagGrid');
+const hotGridEl = document.getElementById('hotGrid');
+const resultEl = document.getElementById('craftResult');
+
+function makeISlot(onTap) {
+  const d = document.createElement('div');
+  d.className = 'islot';
+  const cv = document.createElement('canvas');
+  cv.width = 32; cv.height = 32;
+  const cnt = document.createElement('span');
+  cnt.className = 'cnt';
+  d.appendChild(cv);
+  d.appendChild(cnt);
+  d.addEventListener('pointerdown', e => { e.preventDefault(); onTap(); });
+  return d;
+}
+for (let i = 0; i < 9; i++) craftGridEl.appendChild(makeISlot(() => slotTap({ arr: 'craft', idx: i })));
+for (let i = 9; i < 27; i++) {
+  const idx = i;
+  bagGridEl.appendChild(makeISlot(() => slotTap({ arr: 'inv', idx })));
+}
+for (let i = 0; i < 9; i++) {
+  const idx = i;
+  hotGridEl.appendChild(makeISlot(() => slotTap({ arr: 'inv', idx })));
+}
+resultEl.addEventListener('pointerdown', e => { e.preventDefault(); craftOnce(); });
+document.getElementById('invClose').addEventListener('pointerdown', e => { e.preventDefault(); closeInventory(true); });
+
+function getSlotRef(p) { return p.arr === 'inv' ? inv[p.idx] : craft[p.idx]; }
+function setSlotRef(p, v) { if (p.arr === 'inv') inv[p.idx] = v; else craft[p.idx] = v; }
+
+function slotTap(p) {
+  if (selPick === null) {
+    if (getSlotRef(p)) selPick = p;
+  } else if (selPick.arr === p.arr && selPick.idx === p.idx) {
+    selPick = null; // 同じ場所をタップで選択解除
+  } else {
+    const a = getSlotRef(selPick), b = getSlotRef(p);
+    if (a && b && a.id === b.id) { // 同じアイテムは合体
+      const add = Math.min(64 - b.n, a.n);
+      b.n += add; a.n -= add;
+      if (a.n <= 0) setSlotRef(selPick, null);
+    } else { // 入れ替え
+      setSlotRef(p, a);
+      setSlotRef(selPick, b);
+    }
+    selPick = null;
+    saveInvSoon();
+  }
+  updateHotbarUI();
+  renderInv();
+}
+
+function gridMatrix() {
+  const g = [];
+  for (let r = 0; r < craftSize; r++) {
+    const row = [];
+    for (let c = 0; c < craftSize; c++) {
+      const s = craft[r * 3 + c];
+      row.push(s ? s.id : 0);
+    }
+    g.push(row);
+  }
+  return g;
+}
+function trimG(g) {
+  let r0 = 99, r1 = -1, c0 = 99, c1 = -1;
+  for (let r = 0; r < g.length; r++) for (let c = 0; c < g[r].length; c++)
+    if (g[r][c]) { r0 = Math.min(r0, r); r1 = Math.max(r1, r); c0 = Math.min(c0, c); c1 = Math.max(c1, c); }
+  if (r1 < 0) return null;
+  const out = [];
+  for (let r = r0; r <= r1; r++) {
+    const row = [];
+    for (let c = c0; c <= c1; c++) row.push(g[r][c]);
+    out.push(row);
+  }
+  return out;
+}
+function findRecipe() {
+  const t = trimG(gridMatrix());
+  if (!t) return null;
+  outer: for (const R of RECIPES) {
+    if (R.p.length !== t.length || R.p[0].length !== t[0].length) continue;
+    for (let r = 0; r < t.length; r++)
+      for (let c = 0; c < t[0].length; c++)
+        if (R.p[r][c] !== t[r][c]) continue outer;
+    return R;
+  }
+  return null;
+}
+
+function craftOnce() {
+  if (!curRecipe) return;
+  if (!canHold(curRecipe.out.id, curRecipe.out.n)) { showMsg('⚠ 持ち物がいっぱい！'); return; }
+  for (let i = 0; i < 9; i++) {
+    if (craft[i]) {
+      craft[i].n--;
+      if (craft[i].n <= 0) craft[i] = null;
+    }
+  }
+  give(curRecipe.out.id, curRecipe.out.n);
+  showMsg(nameOf(curRecipe.out.id) + ' をクラフトした！');
+  sfx(300, 480, 0.1, 'sine', 0.12);
+  renderInv();
+}
+
+function renderInv() {
+  for (let i = 0; i < 9; i++) {
+    const el = craftGridEl.children[i];
+    const r = (i / 3) | 0, c = i % 3;
+    el.style.display = (r < craftSize && c < craftSize) ? 'flex' : 'none';
+    const s = craft[i];
+    drawIcon(el.querySelector('canvas').getContext('2d'), s ? s.id : 0);
+    el.querySelector('.cnt').textContent = s && s.n > 1 ? s.n : '';
+    el.classList.toggle('sel2', selPick !== null && selPick.arr === 'craft' && selPick.idx === i);
+  }
+  const cells = [...bagGridEl.children, ...hotGridEl.children];
+  for (let k = 0; k < cells.length; k++) {
+    const idx = k < 18 ? k + 9 : k - 18;
+    const el = cells[k];
+    const s = inv[idx];
+    drawIcon(el.querySelector('canvas').getContext('2d'), s ? s.id : 0);
+    el.querySelector('.cnt').textContent = s && s.n > 1 ? s.n : '';
+    el.classList.toggle('sel2', selPick !== null && selPick.arr === 'inv' && selPick.idx === idx);
+  }
+  curRecipe = findRecipe();
+  drawIcon(resultEl.querySelector('canvas').getContext('2d'), curRecipe ? curRecipe.out.id : 0);
+  resultEl.querySelector('.cnt').textContent = curRecipe && curRecipe.out.n > 1 ? curRecipe.out.n : '';
+}
+
+function openInventory(table) {
+  if (invOpen) return;
+  invOpen = true;
+  craftSize = table ? 3 : 2;
+  stopMining();
+  document.getElementById('invTitle').textContent = table ? '🔨 作業台（3×3）' : '🎒 クラフト（2×2）';
+  craftGridEl.classList.toggle('size2', !table);
+  selPick = null;
+  renderInv();
+  invScreen.style.display = 'flex';
+  if (isTouch) document.getElementById('touchUI').style.display = 'none';
+  else if (locked()) document.exitPointerLock();
+}
+
+function closeInventory(relock) {
+  if (!invOpen) return;
+  // クラフト枠に残ったアイテムは持ち物へ戻す
+  for (let i = 0; i < 9; i++) {
+    if (craft[i]) { give(craft[i].id, craft[i].n); craft[i] = null; }
+  }
+  invOpen = false;
+  selPick = null;
+  invScreen.style.display = 'none';
+  if (isTouch) {
+    if (touchPlaying) document.getElementById('touchUI').style.display = 'block';
+  } else if (relock) {
+    renderer.domElement.requestPointerLock();
+  }
+  slotsChanged();
+}
+
+updateHotbarUI();
 selectSlot(0);
 
 /* ===================== 効果音 ===================== */
@@ -736,12 +1073,14 @@ function sfx(f0, f1, dur, type, vol) {
 let curBright = 1; // 昼夜の明るさ（updateDayNightが更新）
 
 const MOB_TYPES = {
-  pig:    { name: 'ブタ',   hw: 0.35, hh: 1.0,  speed: 1.3, hp: 4 },
-  sheep:  { name: 'ヒツジ', hw: 0.40, hh: 1.25, speed: 1.2, hp: 4 },
-  zombie: { name: 'ゾンビ', hw: 0.30, hh: 1.9,  speed: 1.5, hp: 6, hostile: true },
+  pig:      { name: 'ブタ',       hw: 0.35, hh: 1.0,  speed: 1.3, hp: 4 },
+  sheep:    { name: 'ヒツジ',     hw: 0.40, hh: 1.25, speed: 1.2, hp: 4 },
+  zombie:   { name: 'ゾンビ',     hw: 0.30, hh: 1.9,  speed: 1.5, hp: 6, hostile: true },
+  skeleton: { name: 'スケルトン', hw: 0.30, hh: 1.9,  speed: 1.4, hp: 5, hostile: true, ranged: true },
+  creeper:  { name: 'クリーパー', hw: 0.30, hh: 1.6,  speed: 1.7, hp: 5, hostile: true, creeper: true },
 };
 const MOBS = [];
-const ANIMAL_CAP = 8, ZOMBIE_CAP = 5;
+const ANIMAL_CAP = 8, HOSTILE_CAP = 6;
 
 /* ----- モブ用テクスチャ ----- */
 function mobTex(draw) {
@@ -785,7 +1124,33 @@ const MOB_TEX = {
   }),
   zombieShirt: mobTex(c => texNoise(c, 62, 118, 135, .15)),
   zombiePants: mobTex(c => texNoise(c, 70, 66, 150, .15)),
+  skelSkin: mobTex(c => texNoise(c, 222, 222, 214, .06)),
+  skelFace: mobTex(c => {
+    texNoise(c, 222, 222, 214, .06);
+    c.fillStyle = '#3a3a3a'; c.fillRect(3, 5, 3, 2); c.fillRect(10, 5, 3, 2); // 目
+    c.fillStyle = '#555'; c.fillRect(5, 10, 6, 1);                            // 口
+  }),
+  skelBody: mobTex(c => {
+    texNoise(c, 200, 200, 192, .07);
+    c.fillStyle = 'rgba(70,70,64,.55)';
+    for (const y of [3, 6, 9, 12]) c.fillRect(2, y, 12, 1);                   // あばら
+  }),
+  creeperSkin: mobTex(c => texCreeper(c)),
+  creeperFace: mobTex(c => {
+    texCreeper(c);
+    c.fillStyle = '#000';
+    c.fillRect(3, 4, 3, 3); c.fillRect(10, 4, 3, 3); // 目
+    c.fillRect(6, 7, 4, 4);                          // 鼻〜口
+    c.fillRect(5, 9, 2, 4); c.fillRect(9, 9, 2, 4);  // 口の端
+  }),
 };
+function texCreeper(c) {
+  const cols = ['#6dbf57', '#4e9a3d', '#86d36e', '#3e7a31'];
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    c.fillStyle = cols[(Math.random() * cols.length) | 0];
+    c.fillRect(x, y, 1, 1);
+  }
+}
 
 /* ----- 汎用AABB判定（モブ用） ----- */
 function boxCollides(px, py, pz, hw, hh) {
@@ -841,6 +1206,18 @@ function spawnMob(type, x, y, z) {
     box(0.5, 0.5, 0.5, 0, 1.62, 0, MOB_TEX.zombieSkin, MOB_TEX.zombieFace);   // 頭
     m.arms.push(box(0.2, 0.2, 0.62, -0.35, 1.3, -0.28, MOB_TEX.zombieSkin));  // 前ならえの腕
     m.arms.push(box(0.2, 0.2, 0.62, 0.35, 1.3, -0.28, MOB_TEX.zombieSkin));
+  } else if (type === 'skeleton') {
+    m.legs.push(box(0.18, 0.78, 0.18, -0.12, 0.39, 0, MOB_TEX.skelSkin));
+    m.legs.push(box(0.18, 0.78, 0.18, 0.12, 0.39, 0, MOB_TEX.skelSkin));
+    box(0.46, 0.6, 0.22, 0, 1.08, 0, MOB_TEX.skelBody);                       // あばら胴
+    box(0.46, 0.46, 0.46, 0, 1.62, 0, MOB_TEX.skelSkin, MOB_TEX.skelFace);    // 頭
+    m.arms.push(box(0.14, 0.14, 0.6, -0.32, 1.28, -0.26, MOB_TEX.skelSkin));  // 細い腕
+    m.arms.push(box(0.14, 0.14, 0.6, 0.32, 1.28, -0.26, MOB_TEX.skelSkin));
+  } else if (type === 'creeper') {
+    for (const [lx, lz] of [[-0.15, -0.2], [0.15, -0.2], [-0.15, 0.2], [0.15, 0.2]])
+      m.legs.push(box(0.22, 0.3, 0.24, lx, 0.15, lz, MOB_TEX.creeperSkin));
+    box(0.44, 0.76, 0.3, 0, 0.68, 0, MOB_TEX.creeperSkin);                    // 胴
+    box(0.5, 0.5, 0.5, 0, 1.31, 0, MOB_TEX.creeperSkin, MOB_TEX.creeperFace); // 頭
   }
 
   m.group = g;
@@ -891,13 +1268,44 @@ function updateMob(m, dt) {
   const dpx = player.pos.x - m.pos.x, dpz = player.pos.z - m.pos.z;
   const distP = Math.hypot(dpx, dpz);
 
-  if (T.hostile && curBright < 0.45 && distP < 24) {
-    // 夜のゾンビ：プレイヤーを追跡
+  if (T.hostile && curBright < 0.45 && distP < 28) {
     m.yaw = Math.atan2(-dpx, -dpz);
-    speed = T.speed * 1.6;
-    if (distP < 1.2 && m.hurtCd <= 0) {
-      m.hurtCd = 1.0;
-      damagePlayer(1, dpx / (distP || 1), dpz / (distP || 1));
+    if (T.ranged) {
+      // スケルトン：距離を保って弓を撃つ
+      if (distP > 9) speed = T.speed;
+      m.shootCd = (m.shootCd === undefined ? 1 : m.shootCd) - dt;
+      if (distP < 15 && m.shootCd <= 0) {
+        m.shootCd = 2.2;
+        const from = new THREE.Vector3(m.pos.x, m.pos.y + 1.5, m.pos.z);
+        const dir = new THREE.Vector3(
+          player.pos.x - from.x,
+          player.pos.y + 1.3 - from.y,
+          player.pos.z - from.z).normalize();
+        dir.y += distP * 0.012; // 山なり補正
+        dir.normalize();
+        shootArrow(from, dir);
+        sfx(500, 900, 0.08, 'sine', 0.08);
+      }
+    } else if (T.creeper) {
+      // クリーパー：接近して爆発
+      if (distP > 2.0) {
+        speed = T.speed;
+        if (distP > 4) m.fuse = undefined; // 離れたら導火線リセット
+      } else {
+        m.fuse = (m.fuse === undefined ? 1.3 : m.fuse) - dt;
+        if (m.fuse <= 0) {
+          m.dying = 0.01;
+          explode(m.pos.x, m.pos.y + 0.8, m.pos.z, 2.6);
+          return;
+        }
+      }
+    } else {
+      // ゾンビ：突進して殴る
+      speed = T.speed * 1.6;
+      if (distP < 1.2 && m.hurtCd <= 0) {
+        m.hurtCd = 1.0;
+        damagePlayer(1, dpx / (distP || 1), dpz / (distP || 1));
+      }
     }
   } else {
     // 放浪：歩く⇔立ち止まるを繰り返す
@@ -935,10 +1343,14 @@ function updateMob(m, dt) {
   m.group.position.copy(m.pos);
   m.group.rotation.y = m.yaw;
 
-  // 昼夜の明るさ＋被弾フラッシュ
+  // 昼夜の明るさ＋被弾フラッシュ＋クリーパーの点滅
   m.flash -= dt;
+  const fusing = m.fuse !== undefined && m.fuse > 0;
+  if (fusing) m.group.scale.setScalar(1 + (1.3 - m.fuse) * 0.18); // 膨らむ
+  else m.group.scale.setScalar(1);
   for (const mat of m.mats) {
     if (m.flash > 0) mat.color.setRGB(1, 0.35, 0.35);
+    else if (fusing && Math.floor(m.fuse * 10) % 2 === 0) mat.color.setRGB(1, 1, 1);
     else mat.color.setScalar(curBright);
   }
 }
@@ -959,8 +1371,8 @@ function trySpawn(dt) {
   if (spawnTimer > 0) return;
   spawnTimer = 2.2;
 
-  let animals = 0, zombies = 0;
-  for (const m of MOBS) MOB_TYPES[m.type].hostile ? zombies++ : animals++;
+  let animals = 0, hostiles = 0;
+  for (const m of MOBS) MOB_TYPES[m.type].hostile ? hostiles++ : animals++;
 
   const a = Math.random() * Math.PI * 2, r = 14 + Math.random() * 16;
   const x = Math.floor(player.pos.x + Math.sin(a) * r);
@@ -970,8 +1382,10 @@ function trySpawn(dt) {
   if (animals < ANIMAL_CAP && c.h > WATER + 1)
     spawnMob(Math.random() < 0.5 ? 'pig' : 'sheep', x + 0.5, c.h + 1, z + 0.5);
 
-  if (curBright < 0.4 && zombies < ZOMBIE_CAP && c.h > WATER)
-    spawnMob('zombie', x + 0.5, c.h + 1, z + 0.5);
+  if (curBright < 0.4 && hostiles < HOSTILE_CAP && c.h > WATER) {
+    const roll = Math.random();
+    spawnMob(roll < 0.45 ? 'zombie' : roll < 0.75 ? 'skeleton' : 'creeper', x + 0.5, c.h + 1, z + 0.5);
+  }
 
   // 朝になったらゾンビは消滅
   if (curBright > 0.55)
@@ -1011,7 +1425,9 @@ function raycastMob() {
 }
 
 function hitMob(m) {
-  m.hp -= 2;
+  const s = inv[player.sel];
+  const dmg = s && s.id >= 100 && ITEMS[s.id].dmg ? ITEMS[s.id].dmg : 1; // 素手1／剣で強化
+  m.hp -= dmg;
   m.flash = 0.18;
   let dx = m.pos.x - player.pos.x, dz = m.pos.z - player.pos.z;
   const l = Math.hypot(dx, dz) || 1;
@@ -1022,6 +1438,119 @@ function hitMob(m) {
   if (m.hp <= 0) {
     m.dying = 0.5;
     sfx(160, 40, 0.3, 'sawtooth', 0.12);
+  }
+}
+
+/* ----- 矢（スケルトンの攻撃） ----- */
+const ARROWS = [];
+const arrowGeo = new THREE.BoxGeometry(0.07, 0.07, 0.55);
+const arrowMat = new THREE.MeshBasicMaterial({ color: 0xd8d8c8 });
+
+function shootArrow(from, dir) {
+  const me = new THREE.Mesh(arrowGeo, arrowMat);
+  me.position.copy(from);
+  scene.add(me);
+  ARROWS.push({ me, vel: dir.clone().multiplyScalar(17), life: 5 });
+}
+
+function updateArrows(dt) {
+  for (let i = ARROWS.length - 1; i >= 0; i--) {
+    const a = ARROWS[i];
+    a.life -= dt;
+    a.vel.y -= 9 * dt;
+    const p = a.me.position;
+    p.addScaledVector(a.vel, dt);
+    a.me.lookAt(p.x + a.vel.x, p.y + a.vel.y, p.z + a.vel.z);
+    let dead = a.life <= 0 || isSolid(getBlock(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)));
+    if (!dead &&
+        Math.abs(p.x - player.pos.x) < 0.45 && Math.abs(p.z - player.pos.z) < 0.45 &&
+        p.y > player.pos.y && p.y < player.pos.y + 1.8) {
+      const l = Math.hypot(a.vel.x, a.vel.z) || 1;
+      damagePlayer(2, a.vel.x / l, a.vel.z / l);
+      dead = true;
+    }
+    if (dead) { scene.remove(a.me); ARROWS.splice(i, 1); }
+  }
+}
+
+/* ----- パーティクル ----- */
+const PARTS = [];
+const partGeo = new THREE.BoxGeometry(0.14, 0.14, 0.14);
+
+function spawnParticles(x, y, z, n, color) {
+  for (let i = 0; i < n; i++) {
+    const mt = new THREE.MeshBasicMaterial({ color });
+    const me = new THREE.Mesh(partGeo, mt);
+    me.position.set(x, y, z);
+    scene.add(me);
+    PARTS.push({
+      me,
+      vx: (Math.random() - .5) * 9, vy: Math.random() * 8, vz: (Math.random() - .5) * 9,
+      life: 0.7 + Math.random() * 0.4,
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = PARTS.length - 1; i >= 0; i--) {
+    const p = PARTS[i];
+    p.life -= dt;
+    p.vy -= 20 * dt;
+    p.me.position.x += p.vx * dt;
+    p.me.position.y += p.vy * dt;
+    p.me.position.z += p.vz * dt;
+    if (p.life <= 0) {
+      scene.remove(p.me);
+      p.me.material.dispose();
+      PARTS.splice(i, 1);
+    }
+  }
+}
+
+/* ----- 爆発（クリーパー） ----- */
+function explode(ex, ey, ez, r) {
+  sfx(70, 25, 0.5, 'sawtooth', 0.4);
+  const touched = new Set();
+  for (let x = Math.floor(ex - r); x <= Math.floor(ex + r); x++)
+    for (let y = Math.max(1, Math.floor(ey - r)); y <= Math.min(MAXY - 1, Math.floor(ey + r)); y++)
+      for (let z = Math.floor(ez - r); z <= Math.floor(ez + r); z++) {
+        const dd = (x + 0.5 - ex) ** 2 + (y + 0.5 - ey) ** 2 + (z + 0.5 - ez) ** 2;
+        if (dd > r * r) continue;
+        const id = getBlock(x, y, z);
+        if (id === 0 || id === 11) continue;
+        edits.set(x + ',' + y + ',' + z, 0);
+        if (y > maxEditY) maxEditY = y;
+        const cx = Math.floor(x / CS), cz = Math.floor(z / CS);
+        touched.add(cx + ',' + cz);
+        const lx = x - cx * CS, lz = z - cz * CS;
+        if (lx === 0) touched.add((cx - 1) + ',' + cz);
+        if (lx === CS - 1) touched.add((cx + 1) + ',' + cz);
+        if (lz === 0) touched.add(cx + ',' + (cz - 1));
+        if (lz === CS - 1) touched.add(cx + ',' + (cz + 1));
+      }
+  scheduleSave();
+  for (const k of touched) {
+    if (!chunks.has(k)) continue;
+    const [cx, cz] = k.split(',').map(Number);
+    buildChunk(cx, cz);
+  }
+  spawnParticles(ex, ey, ez, 26, 0x777777);
+  // プレイヤーへの距離ダメージ
+  const pd = Math.hypot(player.pos.x - ex, player.pos.y + 0.9 - ey, player.pos.z - ez);
+  if (pd < r + 2.5) {
+    const dmg = Math.max(1, Math.round((1 - pd / (r + 2.5)) * 7));
+    const l = Math.hypot(player.pos.x - ex, player.pos.z - ez) || 1;
+    damagePlayer(dmg, (player.pos.x - ex) / l * 2, (player.pos.z - ez) / l * 2);
+  }
+  // 巻き込まれたモブ
+  for (const o of MOBS) {
+    if (o.dying !== undefined) continue;
+    const od = Math.hypot(o.pos.x - ex, o.pos.y + 0.5 - ey, o.pos.z - ez);
+    if (od < r + 1.5) {
+      o.hp -= 5;
+      o.flash = 0.2;
+      if (o.hp <= 0) o.dying = 0.4;
+    }
   }
 }
 
@@ -1214,8 +1743,15 @@ if (isTouch) {
     btnDown.style.display = player.fly ? 'flex' : 'none';
   }, { passive: false });
 
+  document.getElementById('btnInv').addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (invOpen) closeInventory(false);
+    else openInventory(false);
+  }, { passive: false });
+
   document.getElementById('btnPause').addEventListener('touchstart', e => {
     e.preventDefault();
+    if (invOpen) closeInventory(false);
     touchPlaying = false;
     setUIVisible(false);
   }, { passive: false });
@@ -1231,6 +1767,8 @@ function loop() {
   if (playing()) {
     physics(dt);
     updateMobs(dt);
+    updateArrows(dt);
+    updateParticles(dt);
     trySpawn(dt);
     regenHP(dt);
   }

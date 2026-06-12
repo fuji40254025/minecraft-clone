@@ -57,6 +57,7 @@
   .slot.sel { border-color:#fff; box-shadow:0 0 8px rgba(255,255,255,.7); }
   .slot canvas { image-rendering:pixelated; }
   .slot .num { position:absolute; top:1px; left:4px; font-size:10px; color:#ccc; text-shadow:1px 1px 0 #000; }
+  .slot .cnt { position:absolute; right:2px; bottom:0; font-size:12px; font-weight:bold; color:#fff; text-shadow:1px 1px 0 #000; }
   body.touch #hotbar { pointer-events:auto; gap:3px; bottom:8px; }
   body.touch .slot { width:38px; height:38px; border-width:2px; }
   body.touch .slot canvas { width:26px; height:26px; }
@@ -95,6 +96,50 @@
   /* ===== 水中エフェクト ===== */
   #waterfx { position:fixed; inset:0; background:rgba(20,60,160,.35); z-index:5; display:none; pointer-events:none; }
 
+  /* ===== インベントリ／クラフト画面 ===== */
+  #invScreen {
+    position:fixed; inset:0; z-index:16; background:rgba(0,0,0,.55);
+    display:none; align-items:center; justify-content:center;
+  }
+  .invPanel {
+    background:#c6c6c6; border:3px solid #1a1a1a; outline:3px solid #565656;
+    border-radius:4px; padding:12px 14px; max-width:96vw;
+  }
+  .invTitle {
+    font-size:15px; color:#333; margin-bottom:8px; font-weight:bold;
+    display:flex; justify-content:space-between; align-items:center; gap:20px;
+  }
+  #invClose {
+    cursor:pointer; background:#a33; color:#fff; border-radius:4px;
+    padding:2px 12px; font-weight:bold; user-select:none; -webkit-user-select:none;
+  }
+  .craftRow { display:flex; align-items:center; gap:14px; margin-bottom:12px; justify-content:center; }
+  #craftGrid { display:grid; grid-template-columns:repeat(3,46px); gap:3px; }
+  #craftGrid.size2 { grid-template-columns:repeat(2,46px); }
+  .carrow { font-size:26px; color:#444; }
+  .islot {
+    width:46px; height:46px; background:#8b8b8b; position:relative; cursor:pointer;
+    border:2px solid; border-color:#373737 #fff #fff #373737;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .islot canvas { width:32px; height:32px; image-rendering:pixelated; pointer-events:none; }
+  .islot .cnt {
+    position:absolute; right:1px; bottom:-1px; font-size:13px; font-weight:bold;
+    color:#fff; text-shadow:1px 1px 0 #000; pointer-events:none;
+  }
+  .islot.sel2 { box-shadow:0 0 0 3px #ffd966 inset; }
+  .islot.result { width:52px; height:52px; border-color:#2d5a2d #bfe8bf #bfe8bf #2d5a2d; background:#7a9a7a; }
+  .invLabel { font-size:12px; color:#444; margin:6px 0 4px; }
+  #bagGrid { display:grid; grid-template-columns:repeat(9,46px); gap:3px; margin-bottom:10px; }
+  #hotGrid { display:grid; grid-template-columns:repeat(9,46px); gap:3px; border-top:2px solid #999; padding-top:8px; }
+  .invHint { font-size:11px; color:#555; margin-top:8px; max-width:450px; line-height:1.7; }
+  body.touch .islot { width:36px; height:36px; }
+  body.touch .islot canvas { width:26px; height:26px; }
+  body.touch .islot.result { width:42px; height:42px; }
+  body.touch #bagGrid, body.touch #hotGrid { grid-template-columns:repeat(9,36px); }
+  body.touch #craftGrid { grid-template-columns:repeat(3,36px); }
+  body.touch #craftGrid.size2 { grid-template-columns:repeat(2,36px); }
+
   /* ===== モバイル操作UI ===== */
   #touchUI { position:fixed; inset:0; z-index:11; pointer-events:none; display:none; }
   #joyBase {
@@ -126,6 +171,12 @@
     color:#fff; font-size:20px; pointer-events:auto; touch-action:none;
     display:flex; align-items:center; justify-content:center;
   }
+  #btnInv {
+    position:absolute; top:10px; right:66px; width:46px; height:46px;
+    border-radius:10px; background:rgba(0,0,0,.4); border:2px solid rgba(255,255,255,.55);
+    color:#fff; font-size:20px; pointer-events:auto; touch-action:none;
+    display:flex; align-items:center; justify-content:center;
+  }
 </style>
 </head>
 <body>
@@ -144,7 +195,26 @@
   <button class="tbtn" id="btnJump">⬆</button>
   <button class="tbtn" id="btnDown">⬇</button>
   <button class="tbtn" id="btnFly">✈</button>
+  <button id="btnInv">🎒</button>
   <button id="btnPause">⏸</button>
+</div>
+
+<div id="invScreen">
+  <div class="invPanel">
+    <div class="invTitle"><span id="invTitle">🎒 クラフト（2×2）</span><span id="invClose">✕ 閉じる</span></div>
+    <div class="craftRow">
+      <div id="craftGrid" class="size2"></div>
+      <div class="carrow">➡</div>
+      <div class="islot result" id="craftResult"><canvas width="32" height="32"></canvas><span class="cnt"></span></div>
+    </div>
+    <div class="invLabel">持ち物（タップで選択 → 移動先をタップ）</div>
+    <div id="bagGrid"></div>
+    <div id="hotGrid"></div>
+    <div class="invHint">
+      📖 レシピ：原木1→木材4 ／ 木材を縦2→棒4 ／ 木材2×2→作業台 ／
+      <b>作業台(3×3)で</b>：木材2＋棒を縦1列→木の剣 ／ 丸石2＋棒を縦1列→石の剣
+    </div>
+  </div>
 </div>
 
 <div id="overlay">
@@ -153,16 +223,16 @@
   <div class="help kb">
     <b>WASD</b>：移動　<b>Space</b>：ジャンプ　<b>Shift</b>：スニーク（低速）<br>
     <b>F</b>：飛行モード切替（飛行中は Space↑ / Shift↓）<br>
-    <b>左クリック</b>：ブロック破壊　<b>右クリック</b>：設置　<b>中クリック</b>：スポイト<br>
-    <b>1〜9 / ホイール</b>：ブロック選択　<b>Esc</b>：メニュー<br>
-    ※ 世界はこのブラウザに自動保存されます
+    <b>左クリック</b>：破壊・攻撃　<b>右クリック</b>：設置（作業台は開く）<br>
+    <b>E</b>：持ち物・クラフト　<b>1〜9 / ホイール</b>：アイテム選択　<b>Esc</b>：メニュー<br>
+    ※ ブロックを壊して素材を集め、クラフトで道具を作ろう！
   </div>
   <div class="help touch">
     <b>左のパッド</b>：移動　<b>画面ドラッグ</b>：視点<br>
     <b>⛏</b>：破壊（長押しで連続）　<b>🧱</b>：設置　<b>⬆</b>：ジャンプ<br>
     <b>✈</b>：飛行切替（飛行中は ⬆上昇 / ⬇下降）<br>
-    <b>ホットバー</b>：タップでブロック選択　<b>⏸</b>：メニュー<br>
-    ※ 世界はこのブラウザに自動保存されます
+    <b>ホットバー</b>：タップで選択　<b>🎒</b>：持ち物・クラフト　<b>⏸</b>：メニュー<br>
+    ※ ブロックを壊して素材を集め、クラフトで道具を作ろう！
   </div>
   <button id="playBtn">プレイ開始</button>
   <button id="resetBtn" class="danger">🌍 新しい世界を生成（現在の世界は消えます）</button>
