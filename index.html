@@ -107,11 +107,24 @@
   }
   .invTitle {
     font-size:15px; color:#333; margin-bottom:8px; font-weight:bold;
-    display:flex; justify-content:space-between; align-items:center; gap:20px;
+    display:flex; justify-content:space-between; align-items:center; gap:10px;
   }
   #invClose {
     cursor:pointer; background:#a33; color:#fff; border-radius:4px;
     padding:2px 12px; font-weight:bold; user-select:none; -webkit-user-select:none;
+  }
+  #oneToggle {
+    cursor:pointer; background:#666; color:#fff; border-radius:4px; padding:2px 10px;
+    font-size:12px; font-weight:normal; user-select:none; -webkit-user-select:none; margin-left:auto;
+  }
+  #oneToggle.on { background:#2d7a2d; }
+  #cursorItem {
+    position:fixed; width:34px; height:34px; z-index:30; pointer-events:none; display:none;
+  }
+  #cursorItem canvas { width:34px; height:34px; image-rendering:pixelated; }
+  #cursorItem .cnt {
+    position:absolute; right:0; bottom:-3px; font-size:13px; font-weight:bold;
+    color:#fff; text-shadow:1px 1px 0 #000;
   }
   .craftRow { display:flex; align-items:center; gap:14px; margin-bottom:12px; justify-content:center; }
   #craftGrid { display:grid; grid-template-columns:repeat(3,46px); gap:3px; }
@@ -201,7 +214,7 @@
 
 <div id="invScreen">
   <div class="invPanel">
-    <div class="invTitle"><span id="invTitle">🎒 クラフト（2×2）</span><span id="invClose">✕ 閉じる</span></div>
+    <div class="invTitle"><span id="invTitle">🎒 クラフト（2×2）</span><span id="oneToggle">1個ずつ</span><span id="invClose">✕ 閉じる</span></div>
     <div class="craftRow">
       <div id="craftGrid" class="size2"></div>
       <div class="carrow">➡</div>
@@ -212,10 +225,14 @@
     <div id="hotGrid"></div>
     <div class="invHint">
       📖 レシピ：原木1→木材4 ／ 木材を縦2→棒4 ／ 木材2×2→作業台 ／
-      <b>作業台(3×3)で</b>：木材2＋棒を縦1列→木の剣 ／ 丸石2＋棒を縦1列→石の剣
+      <b>作業台(3×3)で</b>：材料2＋棒を縦1列→剣 ／ 材料3を上段＋棒を縦2→ツルハシ<br>
+      🪨 石・鉱石はツルハシが無いと拾えない（木→石→鉄→ダイヤの順に固い鉱石を掘れる）<br>
+      🖱 左クリック=まとめて持つ／置く　右クリック=1個ずつ（スマホは「1個ずつ」ボタンON）
     </div>
   </div>
 </div>
+
+<div id="cursorItem"><canvas width="32" height="32"></canvas><span class="cnt"></span></div>
 
 <div id="overlay">
   <h1>⛏ クラフトワールド</h1>

@@ -41,36 +41,117 @@ function noise2(x, z) {
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
 
+// 高速な整数ハッシュ（sin不使用・洞窟/鉱石用）
+const seedI = (seed | 0) || 1;
+function hash3(x, y, z) {
+  let n = (x | 0) * 374761393 + (y | 0) * 668265263 + (z | 0) * 1274126177 + seedI * 1013;
+  n = (n ^ (n >> 13)) * 1274126177;
+  n = n ^ (n >> 16);
+  return ((n >>> 0) % 100000) / 100000;
+}
+function smooth(t) { return t * t * (3 - 2 * t); }
+// 3Dバリューノイズ（0〜1）
+function noise3(x, y, z) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = smooth(x - xi), yf = smooth(y - yi), zf = smooth(z - zi);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const c000 = hash3(xi, yi, zi),       c100 = hash3(xi + 1, yi, zi);
+  const c010 = hash3(xi, yi + 1, zi),   c110 = hash3(xi + 1, yi + 1, zi);
+  const c001 = hash3(xi, yi, zi + 1),   c101 = hash3(xi + 1, yi, zi + 1);
+  const c011 = hash3(xi, yi + 1, zi + 1), c111 = hash3(xi + 1, yi + 1, zi + 1);
+  return lerp(
+    lerp(lerp(c000, c100, xf), lerp(c010, c110, xf), yf),
+    lerp(lerp(c001, c101, xf), lerp(c011, c111, xf), yf), zf);
+}
+
+/* ----- バイオーム判定 ----- */
+function biomeOf(x, z) {
+  const temp = noise2(x * 0.0032 + 500.5, z * 0.0032 + 500.5);
+  const humid = noise2(x * 0.0032 + 901.5, z * 0.0032 - 901.5);
+  const mnt = noise2(x * 0.0052 + 33.5, z * 0.0052 + 77.5);
+  if (mnt > 0.72) return 'mountains';
+  if (temp < 0.33) return 'snowy';
+  if (temp > 0.6 && humid < 0.42) return 'desert';
+  if (humid > 0.58) return 'forest';
+  return 'plains';
+}
+const BIOME_LABEL = {
+  plains: '🌳 平原', forest: '🌲 森林', desert: '🏜 砂漠',
+  snowy: '❄ 雪原', mountains: '⛰ 山岳',
+};
+
+/* ----- 洞窟（地下の空洞） ----- */
+function isCave(x, y, z) {
+  // 交差するトンネル
+  const t1 = noise3(x * 0.045, y * 0.06, z * 0.045);
+  const t2 = noise3(x * 0.045 + 60, y * 0.06 + 60, z * 0.045 + 60);
+  if (Math.abs(t1 - 0.5) < 0.05 && Math.abs(t2 - 0.5) < 0.07) return true;
+  // 大空洞（深部ほど出やすい）
+  if (y < 34 && noise3(x * 0.035 + 200, y * 0.05 + 200, z * 0.035 + 200) > 0.82) return true;
+  return false;
+}
+
+/* ----- 鉱石 ----- */
+function oreAt(x, y, z) {
+  const on = noise3(x * 0.11 + 5, y * 0.11 + 5, z * 0.11 + 5);
+  if (y < 16 && on > 0.9) return 18;            // ダイヤ（最深部）
+  if (y < 30 && on > 0.87) return 17;           // 金
+  if (y < 52 && on > 0.82) return 16;           // 鉄
+  if (on > 0.76 && hash3(x + 1, y + 7, z + 3) < 0.7) return 15; // 石炭（広範囲）
+  return 0;
+}
+
 /* ===================== ブロック定義 ===================== */
 // タイル番号（4x4アトラス）: 0草上 1草横 2土 3石 4砂 5水 6原木横 7原木上
 //                            8葉 9木材 10ガラス 11レンガ 12岩盤 13丸石
 const BLOCKS = {
   1:  { name: '草ブロック', top: 0, bottom: 2, side: 1 },
   2:  { name: '土',        all: 2 },
-  3:  { name: '石',        all: 3 },
+  3:  { name: '石',        all: 3, tier: 1 },
   4:  { name: '砂',        all: 4 },
   5:  { name: '水',        all: 5, trans: true, fluid: true },
   6:  { name: '原木',      top: 7, bottom: 7, side: 6 },
   7:  { name: '葉',        all: 8, trans: true },
   8:  { name: '木材',      all: 9 },
   9:  { name: 'ガラス',    all: 10, trans: true },
-  10: { name: 'レンガ',    all: 11 },
+  10: { name: 'レンガ',    all: 11, tier: 1 },
   11: { name: '岩盤',      all: 12 },
-  12: { name: '丸石',      all: 13 },
+  12: { name: '丸石',      all: 13, tier: 1 },
   13: { name: '作業台',    top: 14, bottom: 9, side: 15 },
+  14: { name: '雪',        all: 16 },
+  15: { name: '石炭鉱石',  all: 17, tier: 1 },
+  16: { name: '鉄鉱石',    all: 18, tier: 2 },
+  17: { name: '金鉱石',    all: 19, tier: 3 },
+  18: { name: 'ダイヤ鉱石', all: 20, tier: 3 },
+  19: { name: '砂岩',      all: 21, tier: 1 },
+  20: { name: 'サボテン',  all: 22 },
 };
 const TRANS = new Set([5, 7, 9]);
 
 /* ----- アイテム（非ブロック、ID100以降） ----- */
 const ITEMS = {
-  100: { name: '棒' },
-  101: { name: '木の剣', dmg: 3 },
-  102: { name: '石の剣', dmg: 5 },
+  100: { name: '棒',           kind: 'stick' },
+  101: { name: '木の剣',       kind: 'sword', dmg: 3, col: '#c8a05a', edge: '#e6c47e' },
+  102: { name: '石の剣',       kind: 'sword', dmg: 5, col: '#9a9a9a', edge: '#c8c8c8' },
+  103: { name: '石炭',         kind: 'mat',   col: '#2c2c2c' },
+  104: { name: '鉄',           kind: 'mat',   col: '#d8cfc2' },
+  105: { name: '金',           kind: 'mat',   col: '#f2d24a' },
+  106: { name: 'ダイヤモンド', kind: 'gem',   col: '#4fe0d8' },
+  107: { name: '鉄の剣',       kind: 'sword', dmg: 6, col: '#d8d8d8', edge: '#f0f0f0' },
+  108: { name: '金の剣',       kind: 'sword', dmg: 4, col: '#f2d24a', edge: '#fff0a0' },
+  109: { name: 'ダイヤの剣',   kind: 'sword', dmg: 8, col: '#4fe0d8', edge: '#b6fff6' },
+  110: { name: '木のツルハシ', kind: 'pick',  tier: 1, mine: 0.18, col: '#c8a05a' },
+  111: { name: '石のツルハシ', kind: 'pick',  tier: 2, mine: 0.14, col: '#9a9a9a' },
+  112: { name: '鉄のツルハシ', kind: 'pick',  tier: 3, mine: 0.10, col: '#d8d8d8' },
+  113: { name: 'ダイヤのツルハシ', kind: 'pick', tier: 4, mine: 0.07, col: '#4fe0d8' },
 };
 function nameOf(id) { return id >= 100 ? ITEMS[id].name : BLOCKS[id].name; }
 
 // 破壊時のドロップ（未定義=ブロック自身、0=なし）
-const DROPS = { 1: 2, 3: 12, 7: 0, 11: 0 };
+const DROPS = {
+  1: 2, 3: 12, 7: 0, 11: 0, 14: 0,         // 草→土、石→丸石、葉/岩盤/雪→なし
+  15: 103, 16: 104, 17: 105, 18: 106,      // 鉱石→素材
+};
 function dropOf(id) { const d = DROPS[id]; return d === undefined ? id : d; }
 
 /* ----- クラフトレシピ（形合わせ・0=空マス） ----- */
@@ -78,8 +159,16 @@ const RECIPES = [
   { p: [[6]],               out: { id: 8,   n: 4 } }, // 原木 → 木材×4
   { p: [[8], [8]],          out: { id: 100, n: 4 } }, // 木材を縦2 → 棒×4
   { p: [[8, 8], [8, 8]],    out: { id: 13,  n: 1 } }, // 木材2×2 → 作業台
-  { p: [[8], [8], [100]],   out: { id: 101, n: 1 } }, // 木の剣（要作業台）
-  { p: [[12], [12], [100]], out: { id: 102, n: 1 } }, // 石の剣（要作業台）
+  { p: [[8], [8], [100]],   out: { id: 101, n: 1 } }, // 木の剣
+  { p: [[12], [12], [100]], out: { id: 102, n: 1 } }, // 石の剣
+  { p: [[104], [104], [100]], out: { id: 107, n: 1 } }, // 鉄の剣
+  { p: [[105], [105], [100]], out: { id: 108, n: 1 } }, // 金の剣
+  { p: [[106], [106], [100]], out: { id: 109, n: 1 } }, // ダイヤの剣
+  // ツルハシ（上段3つ＋棒を縦2）
+  { p: [[8, 8, 8], [0, 100, 0], [0, 100, 0]],     out: { id: 110, n: 1 } }, // 木
+  { p: [[12, 12, 12], [0, 100, 0], [0, 100, 0]],  out: { id: 111, n: 1 } }, // 石
+  { p: [[104, 104, 104], [0, 100, 0], [0, 100, 0]], out: { id: 112, n: 1 } }, // 鉄
+  { p: [[106, 106, 106], [0, 100, 0], [0, 100, 0]], out: { id: 113, n: 1 } }, // ダイヤ
 ];
 
 function tileFor(id, dy) {
@@ -90,13 +179,16 @@ function tileFor(id, dy) {
 function isSolid(id) { return id !== 0 && id !== 5; }
 
 /* ===================== テクスチャアトラス（手描き生成） ===================== */
+const ATLAS_COLS = 8;             // アトラスの列数（8×8=64タイル）
 const atlasCanvas = document.createElement('canvas');
-atlasCanvas.width = 64; atlasCanvas.height = 64;
+atlasCanvas.width = ATLAS_COLS * 16; atlasCanvas.height = ATLAS_COLS * 16;
+function tileX(t) { return (t % ATLAS_COLS) * 16; }
+function tileY(t) { return ((t / ATLAS_COLS) | 0) * 16; }
 (function makeAtlas() {
   const ctx = atlasCanvas.getContext('2d');
 
   function noiseTile(t, r, g, b, vary, alpha) {
-    const tx = (t % 4) * 16, ty = ((t / 4) | 0) * 16;
+    const tx = tileX(t), ty = tileY(t);
     for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
       const v = 1 + (Math.random() * 2 - 1) * vary;
       ctx.fillStyle = `rgba(${(r*v)|0},${(g*v)|0},${(b*v)|0},${alpha===undefined?1:alpha})`;
@@ -105,7 +197,17 @@ atlasCanvas.width = 64; atlasCanvas.height = 64;
   }
   function over(t, x, y, w, h, c) {
     ctx.fillStyle = c;
-    ctx.fillRect((t % 4) * 16 + x, ((t / 4) | 0) * 16 + y, w, h);
+    ctx.fillRect(tileX(t) + x, tileY(t) + y, w, h);
+  }
+  // 鉱石：石ベース＋斑点
+  function oreTile(t, spots, sr, sg, sb) {
+    noiseTile(t, 127, 127, 127, .10);
+    for (const [sx, sy] of spots) {
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+        const k = 1 + (Math.random() * 2 - 1) * .18;
+        over(t, sx + dx, sy + dy, 1, 1, `rgb(${(sr*k)|0},${(sg*k)|0},${(sb*k)|0})`);
+      }
+    }
   }
 
   noiseTile(0, 106, 170, 64, .13);                 // 0 草（上面）
@@ -132,14 +234,13 @@ atlasCanvas.width = 64; atlasCanvas.height = 64;
   over(7, 5, 5, 6, 6, '#9a7846');
   over(7, 7, 7, 2, 2, '#7a5c33');
   noiseTile(8, 58, 124, 40, .22);                  // 8 葉
-  const lctx = ctx;
   for (let i = 0; i < 22; i++)                     //   透かし穴
-    lctx.clearRect(32 + ((Math.random()*16)|0), ((Math.random()*16)|0), 1, 1);
+    ctx.clearRect(tileX(8) + ((Math.random()*16)|0), tileY(8) + ((Math.random()*16)|0), 1, 1);
   noiseTile(9, 160, 130, 80, .07);                 // 9 木材
   for (const y of [3, 7, 11, 15])
     over(9, 0, y, 16, 1, 'rgba(60,42,20,.5)');
   // 10 ガラス
-  ctx.clearRect(32, 32, 16, 16);
+  ctx.clearRect(tileX(10), tileY(10), 16, 16);
   over(10, 0, 0, 16, 1, 'rgba(210,230,250,.9)'); over(10, 0, 15, 16, 1, 'rgba(210,230,250,.9)');
   over(10, 0, 0, 1, 16, 'rgba(210,230,250,.9)'); over(10, 15, 0, 1, 16, 'rgba(210,230,250,.9)');
   for (let i = 0; i < 5; i++)
@@ -163,6 +264,19 @@ atlasCanvas.width = 64; atlasCanvas.height = 64;
   over(15, 0, 0, 16, 2, 'rgba(90,60,30,.8)');
   over(15, 2, 4, 4, 5, 'rgba(70,45,20,.75)');      // 工具の影
   over(15, 10, 4, 4, 5, 'rgba(70,45,20,.75)');
+  noiseTile(16, 238, 242, 250, .04);               // 16 雪
+  for (let i = 0; i < 6; i++)
+    over(16, (Math.random()*15)|0, (Math.random()*15)|0, 2, 1, 'rgba(255,255,255,.9)');
+  // 17-20 鉱石（石ベース＋斑点）
+  oreTile(17, [[3,4],[8,3],[5,9],[11,10],[2,11],[12,5]], 32, 32, 32);     // 17 石炭
+  oreTile(18, [[4,3],[9,5],[6,10],[12,8],[3,12]], 196, 150, 110);          // 18 鉄
+  oreTile(19, [[5,4],[10,4],[7,9],[3,11],[12,11]], 244, 208, 70);          // 19 金
+  oreTile(20, [[4,5],[9,3],[6,10],[11,9],[3,12]], 95, 224, 216);           // 20 ダイヤ
+  noiseTile(21, 214, 196, 142, .05);               // 21 砂岩
+  for (const y of [3, 8, 13]) over(21, 0, y, 16, 1, 'rgba(180,160,110,.7)');
+  noiseTile(22, 70, 140, 56, .12);                 // 22 サボテン
+  over(22, 0, 0, 1, 16, 'rgba(40,90,32,.7)'); over(22, 15, 0, 1, 16, 'rgba(40,90,32,.7)');
+  for (const x of [4, 8, 12]) over(22, x, 0, 1, 16, 'rgba(50,110,40,.5)');
 })();
 
 /* ===================== 地形生成 ===================== */
@@ -172,31 +286,132 @@ function column(x, z) {
   let c = colCache.get(k);
   if (c) return c;
   if (colCache.size > 150000) colCache.clear();
+  const biome = biomeOf(x, z);
   const n1 = noise2(x * 0.012, z * 0.012);
   const n2 = noise2(x * 0.05 + 100, z * 0.05 + 100);
   const n3 = noise2(x * 0.16 + 200, z * 0.16 + 200);
   let h = Math.floor(14 + n1 * n1 * 32 + n2 * 8 + n3 * 3);
+
+  // バイオーム別の地表・木の密度・高さ補正
+  let surf = 1, sub = 2, treeP = 0.02, sand = false;
+  if (biome === 'mountains') {
+    const mnt = noise2(x * 0.0052 + 33.5, z * 0.0052 + 77.5);
+    h += Math.floor((mnt - 0.72) * 130 + n2 * 14);
+    surf = 3; sub = 3; treeP = 0.012;
+  } else if (biome === 'snowy') {
+    surf = 14; sub = 2; treeP = 0.02;
+  } else if (biome === 'desert') {
+    surf = 4; sub = 4; treeP = 0; sand = true;
+  } else if (biome === 'forest') {
+    surf = 1; sub = 2; treeP = 0.085;
+  }
   if (h < 2) h = 2;
   if (h > MAXY - 12) h = MAXY - 12;
-  let tree = false, th = 0;
-  if (h > WATER + 1 && rand2(x * 3.31 + 777, z * 3.31 - 777) < 0.02) {
+  if (biome === 'mountains' && h > 52) surf = 14; // 雪山の冠雪
+
+  // 木・サボテン
+  let tree = false, th = 0, cactus = false, ch = 0;
+  if (treeP > 0 && h > WATER + 1 && rand2(x * 3.31 + 777, z * 3.31 - 777) < treeP) {
     tree = true;
     th = 4 + ((rand2(x + 55, z + 99) * 2) | 0);
+  } else if (biome === 'desert' && h > WATER + 1 && rand2(x * 5.7 + 21, z * 5.7 - 21) < 0.014) {
+    cactus = true;
+    ch = 1 + ((rand2(x + 9, z + 4) * 2) | 0);
   }
-  c = { h, tree, th, leafTop: undefined };
+  c = { h, biome, surf, sub, sand, tree, th, cactus, ch, leafTop: undefined };
   colCache.set(k, c);
   return c;
+}
+
+/* ===================== 村（構造物） ===================== */
+const VILLAGE_RS = 110;            // 村の領域サイズ
+const villageCache = new Map();
+function villageRegion(rx, rz) {
+  const key = rx + ',' + rz;
+  let v = villageCache.get(key);
+  if (v !== undefined) return v;
+  if (villageCache.size > 4000) villageCache.clear();
+  if (rand2(rx * 13.1 + 0.5, rz * 13.1 + 0.5) > 0.16) { villageCache.set(key, null); return null; }
+  const cx = rx * VILLAGE_RS + 24 + Math.floor(rand2(rx + 9, rz + 1) * 60);
+  const cz = rz * VILLAGE_RS + 24 + Math.floor(rand2(rx + 2, rz + 7) * 60);
+  const b = biomeOf(cx, cz);
+  if (b !== 'plains' && b !== 'desert') { villageCache.set(key, null); return null; }
+  const nh = 4 + Math.floor(rand2(rx + 5, rz + 5) * 3);
+  const huts = [];
+  for (let i = 0; i < nh; i++) {
+    const hx = cx + Math.floor((rand2(rx * 7 + i + 1, rz * 3 + i + 2) - 0.5) * 40);
+    const hz = cz + Math.floor((rand2(rx * 3 + i + 3, rz * 7 + i + 4) - 0.5) * 40);
+    const base = column(hx, hz).h;
+    if (base > WATER + 1) huts.push({ hx, hz, base });
+  }
+  v = huts.length ? { cx, cz, huts, desert: b === 'desert' } : null;
+  villageCache.set(key, v);
+  return v;
+}
+
+function hutBlock(x, y, z, hut, desert) {
+  const base = hut.base, top = base + 4;
+  const dx = x - hut.hx, dz = z - hut.hz, ax = Math.abs(dx), az = Math.abs(dz);
+  if (ax > 2 || az > 2) return undefined;
+  const wall = desert ? 19 : 8;
+  if (y === base) return desert ? 19 : 12;            // 床
+  if (y === top) return wall;                         // 屋根
+  if (y > base && y < top && (ax === 2 || az === 2)) {
+    if (dz === -2 && dx === 0 && (y === base + 1 || y === base + 2)) return undefined; // 入口
+    if (y === base + 2 && ((ax === 2 && az === 0) || (az === 2 && ax === 0))) return 9; // 窓
+    return wall;                                      // 壁
+  }
+  return undefined;
+}
+
+function villageBlock(x, y, z) {
+  const rx = Math.floor(x / VILLAGE_RS), rz = Math.floor(z / VILLAGE_RS);
+  const v = villageRegion(rx, rz);
+  if (!v) return undefined;
+  for (const hut of v.huts) {
+    if (Math.abs(x - hut.hx) > 2 || Math.abs(z - hut.hz) > 2) continue;
+    if (y < hut.base || y > hut.base + 4) continue;
+    const r = hutBlock(x, y, z, hut, v.desert);
+    if (r !== undefined) return r;
+  }
+  return undefined;
+}
+
+// 指定地点付近の村（村人スポーン判定用）。近ければ true
+function nearVillage(x, z, dist) {
+  for (let drx = -1; drx <= 1; drx++) for (let drz = -1; drz <= 1; drz++) {
+    const v = villageRegion(Math.floor(x / VILLAGE_RS) + drx, Math.floor(z / VILLAGE_RS) + drz);
+    if (!v) continue;
+    for (const hut of v.huts)
+      if (Math.abs(x - hut.hx) < dist && Math.abs(z - hut.hz) < dist) return true;
+  }
+  return false;
 }
 
 function genBlock(x, y, z) {
   if (y < 0 || y >= MAXY) return 0;
   if (y === 0) return 11; // 岩盤
+  // 村などの構造物が最優先
+  const st = villageBlock(x, y, z);
+  if (st !== undefined) return st;
   const c = column(x, z), h = c.h;
   if (y <= h) {
-    if (y === h) return h <= WATER + 1 ? 4 : 1;
-    if (y >= h - 3) return h <= WATER + 1 ? 4 : 2;
-    return 3;
+    let base;
+    if (y === h) base = h <= WATER + 1 ? 4 : c.surf;
+    else if (y >= h - 3) base = h <= WATER + 1 ? 4 : c.sub;
+    else base = 3;
+    // 洞窟で空洞化（地表の少し下〜地下、海の下は除く）
+    if (y >= 2 && y <= h - 2 && h > WATER + 2 && isCave(x, y, z)) return 0;
+    if (base === 3) {
+      if (c.sand && y > h - 9) return 19;        // 砂漠の地下は砂岩
+      const ore = oreAt(x, y, z);
+      if (ore) return ore;
+      return 3;
+    }
+    return base;
   }
+  // サボテン
+  if (c.cactus && y <= h + c.ch) return 20;
   // 幹
   if (c.tree && y <= h + c.th) return 6;
   // 葉（近傍5x5の木から）
@@ -324,10 +539,10 @@ const FACES = [
 
 function pushFace(buf, face, x, y, z, tile, shadeMul) {
   const base = buf.pos.length / 3;
-  const col = tile % 4, row = (tile / 4) | 0;
+  const col = tile % ATLAS_COLS, row = (tile / ATLAS_COLS) | 0;
   for (const c of face.corners) {
     buf.pos.push(x + c.pos[0], y + c.pos[1], z + c.pos[2]);
-    buf.uv.push((col + c.uv[0]) / 4, 1 - (row + 1 - c.uv[1]) / 4);
+    buf.uv.push((col + c.uv[0]) / ATLAS_COLS, 1 - (row + 1 - c.uv[1]) / ATLAS_COLS);
     const s = face.shade * (shadeMul === undefined ? 1 : shadeMul);
     buf.col.push(s, s, s);
   }
@@ -633,10 +848,22 @@ function doBreak() {
   if (m) { hitMob(m); return; }
   const hit = raycast();
   if (!hit || hit.id === 11) return; // 岩盤は壊せない
+  const need = BLOCKS[hit.id].tier || 0;
+  const pick = heldPickTier();
   setBlock(hit.x, hit.y, hit.z, 0);
-  const d = dropOf(hit.id);
-  if (d) give(d, 1); // ドロップを持ち物へ
+  if (need > 0 && pick < need) {
+    // 適正ツルハシでないとドロップしない（本家準拠）
+    showMsg(need >= 3 ? '⛏ 鉄以上のツルハシが必要…' : '⛏ ツルハシが必要…');
+  } else {
+    const d = dropOf(hit.id);
+    if (d) give(d, 1); // ドロップを持ち物へ
+  }
   sfx(170, 55, 0.12, 'square', 0.12);
+}
+
+function heldPickTier() {
+  const s = inv[player.sel];
+  return s && s.id >= 100 && ITEMS[s.id].kind === 'pick' ? ITEMS[s.id].tier : 0;
 }
 
 function doPlace() {
@@ -761,14 +988,43 @@ function itemCanvas(id) {
   cv.width = 16; cv.height = 16;
   const c = cv.getContext('2d');
   const px = (x, y, col) => { c.fillStyle = col; c.fillRect(x, y, 1, 1); };
-  if (id === 100) { // 棒
+  const it = ITEMS[id] || {};
+  if (it.kind === 'stick') {
     for (let i = 0; i < 9; i++) { px(4 + i, 11 - i, '#8a6432'); px(5 + i, 11 - i, '#6e4f26'); }
-  } else if (id === 101 || id === 102) { // 剣
-    const blade = id === 101 ? '#c8a05a' : '#9a9a9a';
-    const edge = id === 101 ? '#e6c47e' : '#c8c8c8';
+  } else if (it.kind === 'sword') {
+    const blade = it.col, edge = it.edge || it.col;
     for (let i = 0; i < 8; i++) { px(6 + i, 9 - i, blade); px(7 + i, 9 - i, edge); }
     px(5, 11, '#332211'); px(6, 10, '#332211'); px(7, 11, '#332211'); px(6, 12, '#332211'); // つば
     px(4, 12, '#6e4f26'); px(3, 13, '#6e4f26'); px(2, 14, '#55401e');                       // 柄
+  } else if (it.kind === 'pick') {
+    // 柄
+    for (let i = 0; i < 8; i++) { px(8 - i + 4, 4 + i, '#6e4f26'); }
+    for (let i = 0; i < 8; i++) px(8, 5 + i, '#8a6432');
+    // ツルハシの頭（弧）
+    const m = it.col;
+    for (let i = 0; i < 5; i++) { px(3 + i, 5 - (i < 3 ? i : 4 - i) , m); }
+    px(3, 5, m); px(4, 4, m); px(5, 4, m); px(6, 4, m); px(7, 4, m); px(8, 4, m);
+    px(9, 4, m); px(10, 4, m); px(11, 5, m); px(12, 6, m);
+    px(2, 6, m); px(13, 7, m);
+  } else { // mat / gem
+    const m = it.col || '#aaa';
+    const dk = 'rgba(0,0,0,.35)';
+    if (it.kind === 'gem') { // ダイヤ風のひし形
+      px(7, 3, m); px(8, 3, m);
+      for (let i = 0; i < 3; i++) { px(5 + i, 5, m); px(8 + i, 5, m); }
+      for (let x = 4; x <= 11; x++) px(x, 7, m);
+      for (let x = 5; x <= 10; x++) px(x, 9, m);
+      for (let x = 6; x <= 9; x++) px(x, 11, m);
+      px(7, 13, m); px(8, 13, m);
+      px(6, 5, '#ffffff'); px(10, 8, dk);
+    } else { // 塊（石炭・鉄・金）
+      for (let y = 5; y <= 11; y++) for (let x = 4; x <= 12; x++) {
+        const e = (x === 4 || x === 12 || y === 5 || y === 11);
+        if ((x === 4 && y === 5) || (x === 12 && y === 11) || (x === 4 && y === 11) || (x === 12 && y === 5)) continue;
+        px(x, y, e ? dk : m);
+      }
+      px(6, 7, 'rgba(255,255,255,.5)');
+    }
   }
   itemIconCache[id] = cv;
   return cv;
@@ -790,7 +1046,7 @@ function drawIcon(c2, id) {
   c2.imageSmoothingEnabled = false;
   if (id < 100) {
     const tile = tileFor(id, 0);
-    c2.drawImage(atlasCanvas, (tile % 4) * 16, ((tile / 4) | 0) * 16, 16, 16, 0, 0, 32, 32);
+    c2.drawImage(atlasCanvas, tileX(tile), tileY(tile), 16, 16, 0, 0, 32, 32);
   } else {
     c2.drawImage(itemCanvas(id), 0, 0, 32, 32);
   }
@@ -885,13 +1141,17 @@ function selectSlot(i) {
 }
 
 /* ----- インベントリ／クラフト画面 ----- */
-let invOpen = false, craftSize = 2, curRecipe = null, selPick = null;
+let invOpen = false, craftSize = 2, curRecipe = null;
+let cursor = null;          // 手に持っているアイテム {id,n}（本家のカーソル方式）
+let oneMode = false;        // スマホ用「1個ずつ」モード
+const lastPointer = { x: innerWidth / 2, y: innerHeight / 2 };
 const craft = new Array(9).fill(null); // 3×3固定、2×2時は左上の4マスだけ使う
 const invScreen = document.getElementById('invScreen');
 const craftGridEl = document.getElementById('craftGrid');
 const bagGridEl = document.getElementById('bagGrid');
 const hotGridEl = document.getElementById('hotGrid');
 const resultEl = document.getElementById('craftResult');
+const cursorItemEl = document.getElementById('cursorItem');
 
 function makeISlot(onTap) {
   const d = document.createElement('div');
@@ -902,44 +1162,104 @@ function makeISlot(onTap) {
   cnt.className = 'cnt';
   d.appendChild(cv);
   d.appendChild(cnt);
-  d.addEventListener('pointerdown', e => { e.preventDefault(); onTap(); });
+  d.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    lastPointer.x = e.clientX; lastPointer.y = e.clientY;
+    onTap(isTouch ? oneMode : e.button === 2);
+  });
+  d.addEventListener('contextmenu', e => e.preventDefault());
   return d;
 }
-for (let i = 0; i < 9; i++) craftGridEl.appendChild(makeISlot(() => slotTap({ arr: 'craft', idx: i })));
+for (let i = 0; i < 9; i++) craftGridEl.appendChild(makeISlot(r => handleSlot({ arr: 'craft', idx: i }, r)));
 for (let i = 9; i < 27; i++) {
   const idx = i;
-  bagGridEl.appendChild(makeISlot(() => slotTap({ arr: 'inv', idx })));
+  bagGridEl.appendChild(makeISlot(r => handleSlot({ arr: 'inv', idx }, r)));
 }
 for (let i = 0; i < 9; i++) {
   const idx = i;
-  hotGridEl.appendChild(makeISlot(() => slotTap({ arr: 'inv', idx })));
+  hotGridEl.appendChild(makeISlot(r => handleSlot({ arr: 'inv', idx }, r)));
 }
-resultEl.addEventListener('pointerdown', e => { e.preventDefault(); craftOnce(); });
+resultEl.addEventListener('pointerdown', e => { e.preventDefault(); takeResult(); });
+resultEl.addEventListener('contextmenu', e => e.preventDefault());
 document.getElementById('invClose').addEventListener('pointerdown', e => { e.preventDefault(); closeInventory(true); });
+const oneToggleEl = document.getElementById('oneToggle');
+oneToggleEl.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  oneMode = !oneMode;
+  oneToggleEl.classList.toggle('on', oneMode);
+  oneToggleEl.textContent = oneMode ? '1個ずつ ✓' : '1個ずつ';
+});
+invScreen.addEventListener('pointermove', e => {
+  lastPointer.x = e.clientX; lastPointer.y = e.clientY;
+  renderCursor();
+});
 
 function getSlotRef(p) { return p.arr === 'inv' ? inv[p.idx] : craft[p.idx]; }
 function setSlotRef(p, v) { if (p.arr === 'inv') inv[p.idx] = v; else craft[p.idx] = v; }
 
-function slotTap(p) {
-  if (selPick === null) {
-    if (getSlotRef(p)) selPick = p;
-  } else if (selPick.arr === p.arr && selPick.idx === p.idx) {
-    selPick = null; // 同じ場所をタップで選択解除
-  } else {
-    const a = getSlotRef(selPick), b = getSlotRef(p);
-    if (a && b && a.id === b.id) { // 同じアイテムは合体
-      const add = Math.min(64 - b.n, a.n);
-      b.n += add; a.n -= add;
-      if (a.n <= 0) setSlotRef(selPick, null);
-    } else { // 入れ替え
-      setSlotRef(p, a);
-      setSlotRef(selPick, b);
+// 本家準拠：左クリック=まとめて持つ/置く/入替、右クリック=半分持つ/1個ずつ置く
+function handleSlot(p, right) {
+  const slot = getSlotRef(p);
+  if (!cursor) {
+    if (!slot) return;
+    if (right) {
+      const half = Math.ceil(slot.n / 2);
+      cursor = { id: slot.id, n: half };
+      slot.n -= half;
+      if (slot.n <= 0) setSlotRef(p, null);
+    } else {
+      cursor = slot;
+      setSlotRef(p, null);
     }
-    selPick = null;
-    saveInvSoon();
+  } else if (!slot) {
+    if (right) {
+      setSlotRef(p, { id: cursor.id, n: 1 });
+      if (--cursor.n <= 0) cursor = null;
+    } else {
+      setSlotRef(p, cursor);
+      cursor = null;
+    }
+  } else if (slot.id === cursor.id) {
+    if (right) {
+      if (slot.n < 64) { slot.n++; if (--cursor.n <= 0) cursor = null; }
+    } else {
+      const add = Math.min(64 - slot.n, cursor.n);
+      slot.n += add; cursor.n -= add;
+      if (cursor.n <= 0) cursor = null;
+    }
+  } else if (!right) { // 別アイテム → 入れ替え
+    setSlotRef(p, cursor);
+    cursor = slot;
   }
+  saveInvSoon();
   updateHotbarUI();
   renderInv();
+}
+
+// 完成品スロット：取れるだけ作ってカーソルに乗せる
+function takeResult() {
+  if (!curRecipe) return;
+  const out = curRecipe.out;
+  if (cursor && (cursor.id !== out.id || cursor.n + out.n > 64)) return;
+  for (let i = 0; i < 9; i++) {
+    if (craft[i] && --craft[i].n <= 0) craft[i] = null;
+  }
+  if (cursor) cursor.n += out.n;
+  else cursor = { id: out.id, n: out.n };
+  showMsg(nameOf(out.id) + ' をクラフト！');
+  sfx(300, 480, 0.1, 'sine', 0.12);
+  saveInvSoon();
+  updateHotbarUI();
+  renderInv();
+}
+
+function renderCursor() {
+  if (!cursor) { cursorItemEl.style.display = 'none'; return; }
+  cursorItemEl.style.display = 'block';
+  drawIcon(cursorItemEl.querySelector('canvas').getContext('2d'), cursor.id);
+  cursorItemEl.querySelector('.cnt').textContent = cursor.n > 1 ? cursor.n : '';
+  cursorItemEl.style.left = (lastPointer.x - 17) + 'px';
+  cursorItemEl.style.top = (lastPointer.y - 17) + 'px';
 }
 
 function gridMatrix() {
@@ -980,21 +1300,6 @@ function findRecipe() {
   return null;
 }
 
-function craftOnce() {
-  if (!curRecipe) return;
-  if (!canHold(curRecipe.out.id, curRecipe.out.n)) { showMsg('⚠ 持ち物がいっぱい！'); return; }
-  for (let i = 0; i < 9; i++) {
-    if (craft[i]) {
-      craft[i].n--;
-      if (craft[i].n <= 0) craft[i] = null;
-    }
-  }
-  give(curRecipe.out.id, curRecipe.out.n);
-  showMsg(nameOf(curRecipe.out.id) + ' をクラフトした！');
-  sfx(300, 480, 0.1, 'sine', 0.12);
-  renderInv();
-}
-
 function renderInv() {
   for (let i = 0; i < 9; i++) {
     const el = craftGridEl.children[i];
@@ -1003,7 +1308,6 @@ function renderInv() {
     const s = craft[i];
     drawIcon(el.querySelector('canvas').getContext('2d'), s ? s.id : 0);
     el.querySelector('.cnt').textContent = s && s.n > 1 ? s.n : '';
-    el.classList.toggle('sel2', selPick !== null && selPick.arr === 'craft' && selPick.idx === i);
   }
   const cells = [...bagGridEl.children, ...hotGridEl.children];
   for (let k = 0; k < cells.length; k++) {
@@ -1012,11 +1316,11 @@ function renderInv() {
     const s = inv[idx];
     drawIcon(el.querySelector('canvas').getContext('2d'), s ? s.id : 0);
     el.querySelector('.cnt').textContent = s && s.n > 1 ? s.n : '';
-    el.classList.toggle('sel2', selPick !== null && selPick.arr === 'inv' && selPick.idx === idx);
   }
   curRecipe = findRecipe();
   drawIcon(resultEl.querySelector('canvas').getContext('2d'), curRecipe ? curRecipe.out.id : 0);
   resultEl.querySelector('.cnt').textContent = curRecipe && curRecipe.out.n > 1 ? curRecipe.out.n : '';
+  renderCursor();
 }
 
 function openInventory(table) {
@@ -1026,7 +1330,6 @@ function openInventory(table) {
   stopMining();
   document.getElementById('invTitle').textContent = table ? '🔨 作業台（3×3）' : '🎒 クラフト（2×2）';
   craftGridEl.classList.toggle('size2', !table);
-  selPick = null;
   renderInv();
   invScreen.style.display = 'flex';
   if (isTouch) document.getElementById('touchUI').style.display = 'none';
@@ -1035,12 +1338,13 @@ function openInventory(table) {
 
 function closeInventory(relock) {
   if (!invOpen) return;
-  // クラフト枠に残ったアイテムは持ち物へ戻す
+  // クラフト枠・カーソルに残ったアイテムは持ち物へ戻す
   for (let i = 0; i < 9; i++) {
     if (craft[i]) { give(craft[i].id, craft[i].n); craft[i] = null; }
   }
+  if (cursor) { give(cursor.id, cursor.n); cursor = null; }
+  renderCursor();
   invOpen = false;
-  selPick = null;
   invScreen.style.display = 'none';
   if (isTouch) {
     if (touchPlaying) document.getElementById('touchUI').style.display = 'block';
@@ -1078,6 +1382,7 @@ const MOB_TYPES = {
   zombie:   { name: 'ゾンビ',     hw: 0.30, hh: 1.9,  speed: 1.5, hp: 6, hostile: true },
   skeleton: { name: 'スケルトン', hw: 0.30, hh: 1.9,  speed: 1.4, hp: 5, hostile: true, ranged: true },
   creeper:  { name: 'クリーパー', hw: 0.30, hh: 1.6,  speed: 1.7, hp: 5, hostile: true, creeper: true },
+  villager: { name: '村人',       hw: 0.30, hh: 1.9,  speed: 0.9, hp: 6 },
 };
 const MOBS = [];
 const ANIMAL_CAP = 8, HOSTILE_CAP = 6;
@@ -1142,6 +1447,14 @@ const MOB_TEX = {
     c.fillRect(3, 4, 3, 3); c.fillRect(10, 4, 3, 3); // 目
     c.fillRect(6, 7, 4, 4);                          // 鼻〜口
     c.fillRect(5, 9, 2, 4); c.fillRect(9, 9, 2, 4);  // 口の端
+  }),
+  villagerRobe: mobTex(c => texNoise(c, 110, 76, 52, .10)),
+  villagerSkin: mobTex(c => texNoise(c, 198, 156, 120, .07)),
+  villagerFace: mobTex(c => {
+    texNoise(c, 198, 156, 120, .07);
+    c.fillStyle = '#3a2a1a'; c.fillRect(3, 5, 2, 2); c.fillRect(11, 5, 2, 2); // 目
+    c.fillStyle = '#5a4836'; c.fillRect(0, 2, 16, 2);                         // 眉/髪
+    c.fillStyle = '#b88a64'; c.fillRect(6, 7, 4, 4);                          // 鼻
   }),
 };
 function texCreeper(c) {
@@ -1218,6 +1531,14 @@ function spawnMob(type, x, y, z) {
       m.legs.push(box(0.22, 0.3, 0.24, lx, 0.15, lz, MOB_TEX.creeperSkin));
     box(0.44, 0.76, 0.3, 0, 0.68, 0, MOB_TEX.creeperSkin);                    // 胴
     box(0.5, 0.5, 0.5, 0, 1.31, 0, MOB_TEX.creeperSkin, MOB_TEX.creeperFace); // 頭
+  } else if (type === 'villager') {
+    m.legs.push(box(0.2, 0.7, 0.24, -0.12, 0.35, 0, MOB_TEX.villagerRobe));
+    m.legs.push(box(0.2, 0.7, 0.24, 0.12, 0.35, 0, MOB_TEX.villagerRobe));
+    box(0.5, 0.72, 0.32, 0, 1.06, 0, MOB_TEX.villagerRobe);                   // ローブ胴
+    box(0.5, 0.5, 0.5, 0, 1.66, 0, MOB_TEX.villagerSkin, MOB_TEX.villagerFace); // 頭
+    box(0.16, 0.22, 0.18, 0, 1.62, -0.3, MOB_TEX.villagerSkin);               // 大きな鼻
+    m.arms.push(box(0.16, 0.46, 0.2, -0.31, 1.14, 0.02, MOB_TEX.villagerRobe)); // 組んだ腕
+    m.arms.push(box(0.16, 0.46, 0.2, 0.31, 1.14, 0.02, MOB_TEX.villagerRobe));
   }
 
   m.group = g;
@@ -1379,8 +1700,12 @@ function trySpawn(dt) {
   const z = Math.floor(player.pos.z + Math.cos(a) * r);
   const c = column(x, z);
 
-  if (animals < ANIMAL_CAP && c.h > WATER + 1)
-    spawnMob(Math.random() < 0.5 ? 'pig' : 'sheep', x + 0.5, c.h + 1, z + 0.5);
+  if (animals < ANIMAL_CAP && c.h > WATER + 1) {
+    if (nearVillage(x, z, 22) && Math.random() < 0.5)
+      spawnMob('villager', x + 0.5, c.h + 1, z + 0.5);
+    else
+      spawnMob(Math.random() < 0.5 ? 'pig' : 'sheep', x + 0.5, c.h + 1, z + 0.5);
+  }
 
   if (curBright < 0.4 && hostiles < HOSTILE_CAP && c.h > WATER) {
     const roll = Math.random();
@@ -1637,10 +1962,11 @@ function updateHUD(dt) {
     fps = Math.round(fpsFrames / fpsTime);
     fpsFrames = 0; fpsTime = 0;
   }
+  const bi = column(Math.floor(player.pos.x), Math.floor(player.pos.z)).biome;
   hudEl.innerHTML =
     `FPS: ${fps}<br>` +
     `XYZ: ${player.pos.x.toFixed(1)} / ${player.pos.y.toFixed(1)} / ${player.pos.z.toFixed(1)}<br>` +
-    `${timeLabel()}　${player.fly ? '✈️ 飛行中' : ''}`;
+    `${BIOME_LABEL[bi] || bi}　${timeLabel()}　${player.fly ? '✈️ 飛行中' : ''}`;
   waterfxEl.style.display = eyeInWater() ? 'block' : 'none';
 }
 
